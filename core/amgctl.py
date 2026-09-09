@@ -82,18 +82,35 @@ def _prompt_aws_creds() -> Dict[str, str]:
         print("Using AWS credentials from environment.")
         return {}   # _run() merges os.environ, so nothing extra needed
 
-    print("AWS credentials required to download amgctl.")
-    key_id = getpass.getpass("AWS Access Key ID: ")
-    secret = getpass.getpass("AWS Secret Access Key: ")
-    token  = getpass.getpass("AWS Session Token (blank if none): ")
-    region = input("AWS Region [us-east-1]: ").strip() or "us-east-1"
-    env: Dict[str, str] = {
-        "AWS_ACCESS_KEY_ID":     key_id,
-        "AWS_SECRET_ACCESS_KEY": secret,
-        "AWS_DEFAULT_REGION":    region,
-    }
-    if token:
-        env["AWS_SESSION_TOKEN"] = token
+    print("\nAWS credentials required to download amgctl.")
+    print("Paste your export lines below, then press Enter twice:")
+    print('  export AWS_ACCESS_KEY_ID="..."')
+    print('  export AWS_SECRET_ACCESS_KEY="..."')
+    print('  export AWS_SESSION_TOKEN="..."')
+    print()
+
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line == "" and lines:
+            break
+        lines.append(line)
+
+    env: Dict[str, str] = {}
+    _wanted = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+               "AWS_SESSION_TOKEN", "AWS_DEFAULT_REGION"}
+    for line in lines:
+        m = re.match(r'^\s*(?:export\s+)?([A-Z_]+)=(["\']?)(.*?)\2\s*$', line)
+        if m and m.group(1) in _wanted:
+            env[m.group(1)] = m.group(3)
+
+    if not env.get("AWS_ACCESS_KEY_ID"):
+        raise AmgctlError("No AWS_ACCESS_KEY_ID found in pasted credentials.")
+    if "AWS_DEFAULT_REGION" not in env:
+        env["AWS_DEFAULT_REGION"] = "us-east-1"
     return env
 
 
@@ -135,10 +152,7 @@ def ensure_amgctl() -> None:
     else:
         print("amgctl binary not found.")
         aws_env = _prompt_aws_creds()
-        dl_version = (
-            os.environ.get("CHARTOOLS_AMGCTL_VERSION")
-            or input("amgctl version to download (e.g. 1.6.4): ").strip()
-        )
+        dl_version = os.environ.get("CHARTOOLS_AMGCTL_VERSION", "1.6.4")
 
     _download_amgctl(dl_version, aws_env)
 
