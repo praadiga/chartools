@@ -4,7 +4,6 @@ Testsuite and testcase deploy flow.
 Each testsuite runs in its own thread (dispatched by runner.py).
 Testcases within a testsuite are deployed serially.
 """
-from __future__ import annotations
 
 import logging
 import sys

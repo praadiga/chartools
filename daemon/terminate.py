@@ -9,7 +9,6 @@ Flow per expired run:
   4. Update run status → SUCCESS
   5. If all runs done → write summary.yaml, set testsuite status → SUCCESS
 """
-from __future__ import annotations
 
 import logging
 import threading

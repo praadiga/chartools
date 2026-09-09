@@ -98,7 +98,7 @@ def status(
         dirs = scan_all_testsuites()
         if not dirs:
             from core.status import CHARACTERIZATION_BASE
-        console.print(f"No testsuites found under {CHARACTERIZATION_BASE}")
+            console.print(f"No testsuites found under {CHARACTERIZATION_BASE}")
             return
 
         tbl = Table(show_header=True, header_style="bold")

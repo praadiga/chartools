@@ -1,5 +1,4 @@
 """Parse top log files and compute percentile reports."""
-from __future__ import annotations
 
 import json
 import re

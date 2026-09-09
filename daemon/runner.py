@@ -5,7 +5,6 @@ Start with: chartools daemon start
 Communicates via Unix socket at ~/.chartools/daemon.sock.
 Accepts: {"action": "add", "dir": "<abs_path>"}
 """
-from __future__ import annotations
 
 import json
 import logging

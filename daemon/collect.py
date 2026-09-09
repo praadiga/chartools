@@ -8,7 +8,6 @@ Responsibilities:
   - Allow terminate.py to stop all threads for a run
   - On daemon restart, re-attach sync threads without re-injecting (container kept writing)
 """
-from __future__ import annotations
 
 import logging
 import os

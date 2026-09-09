@@ -1,5 +1,4 @@
 """Patch topology.yaml and coreservice.yaml for a testcase deployment."""
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict
