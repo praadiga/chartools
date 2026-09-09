@@ -1,5 +1,4 @@
 """amgctl binary management and all amgctl command wrappers."""
-from __future__ import annotations
 
 import getpass
 import json
@@ -13,7 +12,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-AMGCTL_BIN    = Path("/home/amagi/bin/amgctl")
+AMGCTL_BIN    = Path(
+    os.environ.get("CHARTOOLS_AMGCTL",
+                   os.path.expanduser("~/bin/amgctl"))
+)
 _S3_BASE      = "s3://iota-non-prod-artifacts/ieg-core_services"
 _ANSI_RE      = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 

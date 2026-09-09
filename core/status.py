@@ -1,5 +1,4 @@
 """Read/write status.yaml with file locking."""
-from __future__ import annotations
 
 import fcntl
 import os
@@ -9,7 +8,10 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-CHARACTERIZATION_BASE = Path("/home/amagi/characterization")
+CHARACTERIZATION_BASE = Path(
+    os.environ.get("CHARTOOLS_BASE",
+                   os.path.expanduser("~/characterization"))
+)
 
 
 class RunStatus:
