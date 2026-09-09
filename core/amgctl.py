@@ -77,6 +77,11 @@ def _parse_versions(output: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _prompt_aws_creds() -> Dict[str, str]:
+    # if creds are already in the environment, use them silently
+    if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        print("Using AWS credentials from environment.")
+        return {}   # _run() merges os.environ, so nothing extra needed
+
     print("AWS credentials required to download amgctl.")
     key_id = getpass.getpass("AWS Access Key ID: ")
     secret = getpass.getpass("AWS Secret Access Key: ")
@@ -130,7 +135,10 @@ def ensure_amgctl() -> None:
     else:
         print("amgctl binary not found.")
         aws_env = _prompt_aws_creds()
-        dl_version = input("amgctl version to download (e.g. 1.6.4): ").strip()
+        dl_version = (
+            os.environ.get("CHARTOOLS_AMGCTL_VERSION")
+            or input("amgctl version to download (e.g. 1.6.4): ").strip()
+        )
 
     _download_amgctl(dl_version, aws_env)
 
