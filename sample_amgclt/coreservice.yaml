@@ -1,0 +1,20 @@
+cloud_name: iota
+dependencies:
+  addon:
+    name: aws-use1-onecp-use1
+  appinfra:
+    name: hypeus2
+  appstack:
+    name: aws-use1-onecp-use1
+  plsh:
+    name: hypeus2@661
+  workspace:
+    name: use1-onecp
+hooks:
+  license_handler:
+    parameters:
+      LICENSE_KEY: 6a8ec4ad1cae1ffb54648a0c
+last_applied_migration: 002_remove_optimization_keys.cue
+last_state:
+  enabled_license: true
+templates: []

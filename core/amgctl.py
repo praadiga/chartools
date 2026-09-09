@@ -1,0 +1,254 @@
+"""amgctl binary management and all amgctl command wrappers."""
+from __future__ import annotations
+
+import getpass
+import json
+import os
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+AMGCTL_BIN    = Path("/home/amagi/bin/amgctl")
+_S3_BASE      = "s3://iota-non-prod-artifacts/ieg-core_services"
+_ANSI_RE      = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+# Strings to detect in amgctl logs output
+LOG_PR_CREATED     = "PR created in Github, PR number"
+LOG_ALREADY_EXISTS = "already exist in cloud"
+LOG_NO_CHANGE      = "No changes detected to commit"
+LOG_FATAL          = "FATAL"
+
+
+class DeployResult:
+    PR_CREATED     = "PR_CREATED"
+    ALREADY_EXISTS = "ALREADY_EXISTS"
+    NO_CHANGE      = "NO_CHANGE"
+    FATAL          = "FATAL"
+    TIMEOUT        = "TIMEOUT"
+
+
+class AmgctlError(RuntimeError):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _run(cmd: List[str], env: Optional[Dict] = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    merged = {**os.environ, **(env or {})}
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        env=merged,
+        timeout=timeout,
+    )
+
+
+def _amgctl(*args: str, env: Optional[Dict] = None, timeout: int = 120) -> subprocess.CompletedProcess:
+    return _run([str(AMGCTL_BIN)] + list(args), env=env, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Version check + download
+# ---------------------------------------------------------------------------
+
+def _parse_versions(output: str) -> Tuple[Optional[str], Optional[str]]:
+    api = re.search(r"API Version:\s*([0-9.]+)", output)
+    cli = re.search(r"CLI Version:\s*([0-9.]+)", output)
+    if not api:
+        api = re.search(r"api_version=([0-9.]+)", output)
+    if not cli:
+        cli = re.search(r"cli_version=([0-9.]+)", output)
+    return (api.group(1) if api else None), (cli.group(1) if cli else None)
+
+
+def _prompt_aws_creds() -> Dict[str, str]:
+    print("AWS credentials required to download amgctl.")
+    key_id = getpass.getpass("AWS Access Key ID: ")
+    secret = getpass.getpass("AWS Secret Access Key: ")
+    token  = getpass.getpass("AWS Session Token (blank if none): ")
+    region = input("AWS Region [us-east-1]: ").strip() or "us-east-1"
+    env: Dict[str, str] = {
+        "AWS_ACCESS_KEY_ID":     key_id,
+        "AWS_SECRET_ACCESS_KEY": secret,
+        "AWS_DEFAULT_REGION":    region,
+    }
+    if token:
+        env["AWS_SESSION_TOKEN"] = token
+    return env
+
+
+def _download_amgctl(api_version: str, aws_env: Dict[str, str]) -> None:
+    s3_key = f"{_S3_BASE}/{api_version}/binaries/amgctl_Linux_x86_64.tar.gz"
+    print(f"Downloading amgctl {api_version} from S3...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tar_path = os.path.join(tmpdir, "amgctl.tar.gz")
+        res = _run(["aws", "s3", "cp", s3_key, tar_path], env=aws_env, timeout=180)
+        if res.returncode != 0:
+            raise AmgctlError(f"S3 download failed: {res.stderr.strip()}")
+        with tarfile.open(tar_path, "r:gz") as tf:
+            tf.extractall(tmpdir)
+        extracted = os.path.join(tmpdir, "amgctl")
+        if not os.path.exists(extracted):
+            raise AmgctlError("amgctl binary not found in downloaded archive")
+        AMGCTL_BIN.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(extracted, str(AMGCTL_BIN))
+        AMGCTL_BIN.chmod(0o755)
+    print(f"amgctl installed at {AMGCTL_BIN}")
+
+
+def ensure_amgctl() -> None:
+    """
+    Verify amgctl is installed and CLI version == API version.
+    Downloads from S3 (prompting for AWS creds) if binary is missing or mismatched.
+    Called once at daemon start.
+    """
+    if AMGCTL_BIN.exists():
+        res = _amgctl("version")
+        output = strip_ansi(res.stdout + res.stderr)
+        api_ver, cli_ver = _parse_versions(output)
+        if api_ver and cli_ver and api_ver == cli_ver:
+            print(f"amgctl ready: version {api_ver}")
+            return
+        print(f"amgctl version mismatch — CLI={cli_ver} API={api_ver}, re-downloading.")
+        aws_env = _prompt_aws_creds()
+        dl_version = api_ver or cli_ver
+    else:
+        print("amgctl binary not found.")
+        aws_env = _prompt_aws_creds()
+        dl_version = input("amgctl version to download (e.g. 1.6.4): ").strip()
+
+    _download_amgctl(dl_version, aws_env)
+
+    res = _amgctl("version")
+    output = strip_ansi(res.stdout + res.stderr)
+    api_ver, cli_ver = _parse_versions(output)
+    if not (api_ver and cli_ver and api_ver == cli_ver):
+        raise AmgctlError(f"amgctl still mismatched after install: CLI={cli_ver} API={api_ver}")
+    print(f"amgctl ready: version {api_ver}")
+
+
+# ---------------------------------------------------------------------------
+# playout list → headend allocation + cp_release
+# ---------------------------------------------------------------------------
+
+def _parse_list_output(raw: str) -> List[Dict]:
+    clean = strip_ansi(raw).strip()
+    # try full JSON array first
+    try:
+        result = json.loads(clean)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
+    # fall back to newline-delimited JSON objects
+    entries = []
+    for line in clean.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return entries
+
+
+def list_playout(namespace: str, feed_id: str) -> List[Dict]:
+    """Return all amgctl list entries matching namespace_feedid_*."""
+    res = _amgctl("cp", "app", "playout", "list", timeout=60)
+    entries = _parse_list_output(res.stdout + res.stderr)
+    prefix = f"{namespace}_{feed_id}_"
+    return [e for e in entries if str(e.get("name", "")).startswith(prefix)]
+
+
+def allocate_headend(namespace: str, feed_id: str) -> str:
+    """Return the lowest free 3-digit headend_id string for namespace_feedid_*."""
+    entries = list_playout(namespace, feed_id)
+    used: set = set()
+    for e in entries:
+        parts = str(e.get("name", "")).split("_")
+        if len(parts) == 3:
+            try:
+                used.add(int(parts[2]))
+            except ValueError:
+                pass
+    i = 1
+    while i in used:
+        i += 1
+    return f"{i:03d}"
+
+
+def get_cp_release(namespace: str, feed_id: str, ref_headend: str) -> Optional[str]:
+    """Return cp_release for the reference player from amgctl list."""
+    entries = list_playout(namespace, feed_id)
+    ref_name = f"{namespace}_{feed_id}_{ref_headend}"
+    for e in entries:
+        if e.get("name") == ref_name:
+            return e.get("release")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# amgctl playout commands
+# ---------------------------------------------------------------------------
+
+def playout_get(player_name: str, export_dir: Path) -> str:
+    """Export a player's amgctl config files. Pre-deletes export_dir if it exists."""
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+    res = _amgctl("cp", "app", "playout", "get", "-n", player_name, "-e", str(export_dir), timeout=120)
+    output = strip_ansi(res.stdout + res.stderr)
+    if res.returncode != 0 and LOG_FATAL in output:
+        raise AmgctlError(f"amgctl get failed for {player_name}: {output.strip()}")
+    return output
+
+
+def playout_create(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
+    return _amgctl("cp", "app", "playout", "create", "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
+
+
+def playout_destroy(player_name: str) -> subprocess.CompletedProcess:
+    return _amgctl("cp", "app", "playout", "destroy", "-n", player_name, "-q", timeout=300)
+
+
+# ---------------------------------------------------------------------------
+# Log polling
+# ---------------------------------------------------------------------------
+
+def poll_playout_logs(
+    player_name: str,
+    timeout_seconds: int = 1200,
+    poll_interval: int = 10,
+) -> Tuple[str, str]:
+    """
+    Poll `amgctl cp app playout logs -n <player>` until a terminal condition.
+    Returns (DeployResult constant, full log text).
+    """
+    deadline = time.time() + timeout_seconds
+    full_log = ""
+    while time.time() < deadline:
+        res = _amgctl("cp", "app", "playout", "logs", "-n", player_name, timeout=60)
+        output = strip_ansi(res.stdout + res.stderr)
+        full_log = output
+        if LOG_PR_CREATED in output:
+            return DeployResult.PR_CREATED, full_log
+        if LOG_ALREADY_EXISTS in output:
+            return DeployResult.ALREADY_EXISTS, full_log
+        if LOG_NO_CHANGE in output:
+            return DeployResult.NO_CHANGE, full_log
+        if LOG_FATAL in output:
+            return DeployResult.FATAL, full_log
+        time.sleep(poll_interval)
+    return DeployResult.TIMEOUT, full_log
