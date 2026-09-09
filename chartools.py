@@ -97,7 +97,8 @@ def status(
         # global view
         dirs = scan_all_testsuites()
         if not dirs:
-            console.print("No testsuites found under /home/amagi/characterization/")
+            from core.status import CHARACTERIZATION_BASE
+        console.print(f"No testsuites found under {CHARACTERIZATION_BASE}")
             return
 
         tbl = Table(show_header=True, header_style="bold")
