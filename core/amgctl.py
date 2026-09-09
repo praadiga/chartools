@@ -135,17 +135,27 @@ def _download_amgctl(api_version: str, aws_env: Dict[str, str]) -> None:
 
 def ensure_amgctl() -> None:
     """
-    Verify amgctl is installed and CLI version == API version.
-    Downloads from S3 (prompting for AWS creds) if binary is missing or mismatched.
-    Called once at daemon start.
+    Verify amgctl binary is installed. Re-downloads from S3 only when the binary
+    is missing or there is a real CLI/API version mismatch.
+    When amgctl needs 'amgctl configure' (binary exists but config is absent),
+    that is treated as installed — the caller must run configure separately.
     """
     if AMGCTL_BIN.exists():
         res = _amgctl("version")
         output = strip_ansi(res.stdout + res.stderr)
+        # Binary present but amgctl configure hasn't been run yet.
+        # "failed to load config" / "please run command amgctl configure" appears
+        # in stderr — this is not a version mismatch; the binary is fine.
+        if "failed to load config" in output or \
+                "please run command amgctl configure" in output:
+            print(f"amgctl binary found at {AMGCTL_BIN}")
+            print("NOTE: run 'amgctl configure' before deploying.")
+            return
         api_ver, cli_ver = _parse_versions(output)
         if api_ver and cli_ver and api_ver == cli_ver:
             print(f"amgctl ready: version {api_ver}")
             return
+        # Real mismatch — re-download to align CLI with API version.
         print(f"amgctl version mismatch — CLI={cli_ver} API={api_ver}, re-downloading.")
         aws_env = _prompt_aws_creds()
         dl_version = api_ver or cli_ver
