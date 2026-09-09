@@ -74,7 +74,7 @@ def testsuite_add(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     if reply.get("ok"):
-        console.print(f"[green]Testsuite '{ts_dir.name}' added — deploy started.[/green]")
+        console.print(f"[green]Testsuite '{ts_dir.name}' queued — watch: chartools status {ts_dir}[/green]")
     else:
         console.print(f"[red]Error: {reply.get('error')}[/red]")
         raise typer.Exit(1)

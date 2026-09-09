@@ -14,7 +14,7 @@ from typing import Optional
 
 from core.amgctl import (
     AmgctlError, DeployResult,
-    allocate_headend, get_cp_release,
+    allocate_headend, extract_cp_release,
     playout_create, playout_get,
     poll_playout_logs, strip_ansi,
 )
@@ -125,30 +125,31 @@ def _deploy_testcase(
     _ensure_run_entry(ts_dir, tc.name, player_name, headend_id)
     update_run(ts_dir, player_name, status=RunStatus.DEPLOYING)
 
-    # Derive cp_release if not yet known
+    if is_retry:
+        log.info("Retry: skipping amgctl get — files already exist at %s", player_dir)
+        get_output = ""
+    else:
+        # ---------------------------------------------------------------- step 3+4
+        # amgctl get (pre-deletes export_dir if exists)
+        log.info("amgctl get for %s → %s", cfg.reference_player, player_dir)
+        try:
+            get_output = playout_get(cfg.reference_player, player_dir)
+        except (AmgctlError, Exception) as e:
+            log.error("amgctl get failed: %s", e)
+            update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=str(e))
+            return cp_release
+
+    # Derive cp_release if not yet known — parse from amgctl get output / exported files
     if cp_release is None:
-        cp_release = get_cp_release(cfg.ref_namespace, cfg.ref_feed_id, cfg.ref_headend)
+        cp_release = extract_cp_release(get_output, player_dir)
         if cp_release:
             log.info("Derived cp_release: %s", cp_release)
             _write_cp_release(ts_dir, cp_release)
         else:
             log.error("Could not derive cp_release for %s — cannot deploy", player_name)
             update_run(ts_dir, player_name, status=RunStatus.FAILURE,
-                       error_msg="could not derive cp_release from amgctl list")
+                       error_msg="could not derive cp_release from amgctl get output")
             return None
-
-    if is_retry:
-        log.info("Retry: skipping amgctl get — files already exist at %s", player_dir)
-    else:
-        # ---------------------------------------------------------------- step 3+4
-        # amgctl get (pre-deletes export_dir if exists)
-        log.info("amgctl get for %s → %s", cfg.reference_player, player_dir)
-        try:
-            playout_get(cfg.reference_player, player_dir)
-        except (AmgctlError, Exception) as e:
-            log.error("amgctl get failed: %s", e)
-            update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=str(e))
-            return cp_release
 
         # ---------------------------------------------------------------- step 5+6
         # Patch files

@@ -253,6 +253,34 @@ def playout_get(player_name: str, export_dir: Path) -> str:
     return output
 
 
+def extract_cp_release(get_output: str, export_dir: Path) -> Optional[str]:
+    """
+    Extract cp_release (e.g. 'cp_4.22.0.0') from amgctl get output text or
+    the exported coreservice.yaml.  Returns None if not found.
+    """
+    import yaml as _yaml
+
+    # Try command output text first — amgctl often prints the release inline
+    m = re.search(r'(cp_[\d.]+)', get_output)
+    if m:
+        return m.group(1)
+
+    # Try coreservice.yaml top-level 'release' field
+    for fname in ("coreservice.yaml", "coreservice.yml"):
+        cs_path = export_dir / fname
+        if cs_path.exists():
+            try:
+                with open(cs_path) as f:
+                    data = _yaml.safe_load(f) or {}
+                rel = data.get("release")
+                if rel:
+                    return str(rel)
+            except Exception:
+                pass
+
+    return None
+
+
 def playout_create(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
     return _amgctl("cp", "app", "playout", "create", "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
 
