@@ -76,6 +76,13 @@ class Daemon:
                         log.info("Reattached %s", run.player_name)
                     except Exception as e:
                         log.error("Reattach failed for %s: %s", run.player_name, e)
+                elif run.status == RunStatus.DEPLOYING:
+                    # Daemon restarted mid-deploy — we can't recover the deploy
+                    # thread, so mark it FAILURE so it can be retried.
+                    log.warning("Run %s stuck in DEPLOYING on restart — marking FAILURE",
+                                run.player_name)
+                    update_run(ts_dir, run.player_name, status=RunStatus.FAILURE,
+                               error_msg="daemon restarted mid-deploy")
 
     # ------------------------------------------------------------------ socket
 
