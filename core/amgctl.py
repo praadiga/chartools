@@ -217,7 +217,11 @@ def _parse_list_output(raw: str) -> List[Dict]:
 def list_playout(namespace: str, feed_id: str) -> List[Dict]:
     """Return all amgctl list entries matching namespace_feedid_*."""
     res = _amgctl("cp", "app", "playout", "list", timeout=60)
-    entries = _parse_list_output(res.stdout + res.stderr)
+    # INFO/auth lines go to stderr — parse stdout only to avoid corrupting JSON
+    entries = _parse_list_output(res.stdout)
+    if not entries:
+        _log.warning("list_playout: stdout parse returned no entries; stdout=%r",
+                     strip_ansi(res.stdout)[:200])
     prefix = f"{namespace}_{feed_id}_"
     return [e for e in entries if str(e.get("name", "")).startswith(prefix)]
 
@@ -233,10 +237,16 @@ def allocate_headend(namespace: str, feed_id: str) -> str:
                 used.add(int(parts[2]))
             except ValueError:
                 pass
+    existing_names = sorted(str(e.get("name", "")) for e in entries)
+    _log.info("Existing feeds for %s_%s: %s", namespace, feed_id,
+              existing_names if existing_names else "(none found)")
     i = 1
     while i in used:
         i += 1
-    return f"{i:03d}"
+    chosen = f"{i:03d}"
+    _log.info("Allocating headend %s (used: %s)", chosen,
+              sorted(used) if used else "(none)")
+    return chosen
 
 
 def get_cp_release(namespace: str, feed_id: str, ref_headend: str) -> Optional[str]:

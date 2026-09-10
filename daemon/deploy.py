@@ -29,6 +29,24 @@ from daemon.collect import CollectManager, wait_for_pod_running
 
 log = logging.getLogger(__name__)
 
+_LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
+
+
+def _add_testsuite_log(ts_dir: Path) -> logging.FileHandler:
+    """Attach a FileHandler that writes all log output to ts_dir/chartools.log."""
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(str(ts_dir / "chartools.log"))
+    fh.setFormatter(logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
+    logging.getLogger().addHandler(fh)
+    return fh
+
+
+def _remove_testsuite_log(fh: logging.FileHandler) -> None:
+    logging.getLogger().removeHandler(fh)
+    fh.close()
+
+
 
 # ---------------------------------------------------------------------------
 # Review gate
@@ -298,6 +316,7 @@ def deploy_testsuite(ts_dir: Path, collect_manager: CollectManager) -> None:
     Deploy all testcases in a testsuite directory.
     Creates status.yaml if not present, then deploys each testcase serially.
     """
+    ts_log_fh = _add_testsuite_log(ts_dir)
     log.info("Starting deploy for testsuite: %s", ts_dir)
 
     # Load config
@@ -305,6 +324,7 @@ def deploy_testsuite(ts_dir: Path, collect_manager: CollectManager) -> None:
         cfg = load_config(ts_dir / "config.yaml")
     except Exception as e:
         log.error("Failed to load config.yaml for %s: %s", ts_dir, e)
+        _remove_testsuite_log(ts_log_fh)
         return
 
     if not cfg.reference_player:
@@ -342,6 +362,7 @@ def deploy_testsuite(ts_dir: Path, collect_manager: CollectManager) -> None:
         log.error("Could not update testsuite status: %s", e)
 
     log.info("Deploy complete for %s", ts_dir)
+    _remove_testsuite_log(ts_log_fh)
 
 
 # ---------------------------------------------------------------------------
