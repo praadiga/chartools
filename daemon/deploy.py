@@ -151,8 +151,9 @@ def _deploy_testcase(
                        error_msg="could not derive cp_release from amgctl get output")
             return None
 
+    if not is_retry:
         # ---------------------------------------------------------------- step 5+6
-        # Patch files
+        # Patch files (every testcase gets its own fresh export + patch)
         topology_path    = player_dir / "topology.yaml"
         coreservice_path = player_dir / "coreservice.yaml"
 

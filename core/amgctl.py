@@ -42,6 +42,10 @@ class AmgctlError(RuntimeError):
 # Helpers
 # ---------------------------------------------------------------------------
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
@@ -59,7 +63,13 @@ def _run(cmd: List[str], env: Optional[Dict] = None, timeout: int = 120) -> subp
 
 
 def _amgctl(*args: str, env: Optional[Dict] = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    return _run([str(AMGCTL_BIN)] + list(args), env=env, timeout=timeout)
+    cmd_str = "amgctl " + " ".join(args)
+    _log.info("Running: %s", cmd_str)
+    result = _run([str(AMGCTL_BIN)] + list(args), env=env, timeout=timeout)
+    output = strip_ansi(result.stdout + result.stderr).strip()
+    if output:
+        _log.info("Output [%s]:\n%s", cmd_str, output)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -296,25 +306,70 @@ def playout_destroy(player_name: str) -> subprocess.CompletedProcess:
 def poll_playout_logs(
     player_name: str,
     timeout_seconds: int = 1200,
-    poll_interval: int = 10,
 ) -> Tuple[str, str]:
     """
-    Poll `amgctl cp app playout logs -n <player>` until a terminal condition.
+    Stream `amgctl cp app playout logs -n <player>` and scan for terminal
+    conditions.  The command streams indefinitely — it must NOT be called
+    with a short subprocess timeout; instead we Popen it and read line-by-line
+    until we see a terminal string or the overall deadline is reached.
+
     Returns (DeployResult constant, full log text).
     """
+    import select as _select
+
     deadline = time.time() + timeout_seconds
     full_log = ""
-    while time.time() < deadline:
-        res = _amgctl("cp", "app", "playout", "logs", "-n", player_name, timeout=60)
-        output = strip_ansi(res.stdout + res.stderr)
-        full_log = output
-        if LOG_PR_CREATED in output:
-            return DeployResult.PR_CREATED, full_log
-        if LOG_ALREADY_EXISTS in output:
-            return DeployResult.ALREADY_EXISTS, full_log
-        if LOG_NO_CHANGE in output:
-            return DeployResult.NO_CHANGE, full_log
-        if LOG_FATAL in output:
-            return DeployResult.FATAL, full_log
-        time.sleep(poll_interval)
-    return DeployResult.TIMEOUT, full_log
+
+    _log.info("Running: amgctl cp app playout logs -n %s (streaming until terminal condition)", player_name)
+
+    proc = subprocess.Popen(
+        [str(AMGCTL_BIN), "cp", "app", "playout", "logs", "-n", player_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        env={**os.environ},
+    )
+
+    def _check(text: str) -> Optional[str]:
+        if LOG_PR_CREATED     in text: return DeployResult.PR_CREATED
+        if LOG_ALREADY_EXISTS in text: return DeployResult.ALREADY_EXISTS
+        if LOG_NO_CHANGE      in text: return DeployResult.NO_CHANGE
+        if LOG_FATAL          in text: return DeployResult.FATAL
+        return None
+
+    try:
+        while time.time() < deadline:
+            remaining = max(0.1, deadline - time.time())
+            ready, _, _ = _select.select([proc.stdout], [], [], min(10.0, remaining))
+            if ready:
+                line = proc.stdout.readline()
+                if not line:        # EOF — process exited
+                    break
+                full_log += line
+                clean_line = strip_ansi(line).rstrip()
+                if clean_line:
+                    _log.info("[logs:%s] %s", player_name, clean_line)
+                result = _check(strip_ansi(full_log))
+                if result:
+                    _log.info("Terminal condition for %s: %s", player_name, result)
+                    return result, strip_ansi(full_log)
+            elif proc.poll() is not None:
+                break
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    # Drain any remaining buffered output after the process exits
+    try:
+        tail, _ = proc.communicate(timeout=5)
+        if tail:
+            full_log += tail
+    except Exception:
+        pass
+
+    clean = strip_ansi(full_log)
+    return _check(clean) or DeployResult.TIMEOUT, clean
