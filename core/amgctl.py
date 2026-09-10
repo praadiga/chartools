@@ -311,8 +311,16 @@ def extract_cp_release(get_output: str, export_dir: Path) -> Optional[str]:
     return None
 
 
+def playout_create_dryrun(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
+    """Create PR (dry-run). Must be called before playout_create."""
+    return _amgctl("cp", "app", "playout", "create",
+                   "-r", cp_release, "-i", str(player_dir), "-q", "--dry-run", timeout=300)
+
+
 def playout_create(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
-    return _amgctl("cp", "app", "playout", "create", "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
+    """Merge the PR created by playout_create_dryrun and submit deploy job."""
+    return _amgctl("cp", "app", "playout", "create",
+                   "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
 
 
 def playout_destroy(player_name: str) -> subprocess.CompletedProcess:

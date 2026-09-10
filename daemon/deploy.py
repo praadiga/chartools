@@ -15,7 +15,7 @@ from typing import Optional
 from core.amgctl import (
     AmgctlError, DeployResult,
     allocate_headend, extract_cp_release,
-    playout_create, playout_get,
+    playout_create, playout_create_dryrun, playout_get,
     poll_playout_logs, strip_ansi,
 )
 from core.config import TestcaseConfig, TestsuiteConfig, load_config
@@ -199,32 +199,44 @@ def _deploy_testcase(
         update_run(ts_dir, player_name, status=RunStatus.CANCELLED)
         return cp_release
 
-    # ----------------------------------------------------------------- step 8
-    # amgctl create
-    log.info("Running amgctl create for %s (cp_release=%s)", player_name, cp_release)
-    create_res = playout_create(cp_release, player_dir)
+    # ----------------------------------------------------------------- step 8a
+    # amgctl create --dry-run → creates the GitHub PR
+    log.info("Running amgctl create --dry-run for %s (cp_release=%s)", player_name, cp_release)
+    dryrun_res = playout_create_dryrun(cp_release, player_dir)
     _append(
-        f"amgctl cp app playout create -r {cp_release} -i {player_dir}",
-        strip_ansi(create_res.stdout + create_res.stderr),
+        f"amgctl cp app playout create -r {cp_release} -i {player_dir} --dry-run",
+        strip_ansi(dryrun_res.stdout + dryrun_res.stderr),
     )
 
-    # ----------------------------------------------------------------- step 9 (log poll)
-    log.info("Polling amgctl logs for %s...", player_name)
-    result, full_log = poll_playout_logs(player_name)
-    _append(f"amgctl cp app playout logs -n {player_name}", full_log)
+    # ----------------------------------------------------------------- step 8b
+    # poll logs until PR is created (or fails)
+    log.info("Polling amgctl logs for %s (dry-run — waiting for PR creation)...", player_name)
+    dr_result, dr_log = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [dry-run]", dr_log)
 
-    if result == DeployResult.ALREADY_EXISTS:
+    if dr_result == DeployResult.ALREADY_EXISTS:
         msg = ("player already exists in cloud — destroy it first with: "
                f"amgctl cp app playout destroy -n {player_name}")
         log.error(msg)
         update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
         return cp_release
 
-    if result != DeployResult.PR_CREATED:
-        msg = f"deployment did not succeed (result={result}) — check logs/{player_name}/deploy.log"
+    if dr_result == DeployResult.NO_CHANGE:
+        log.info("No changes detected for %s — proceeding to merge", player_name)
+    elif dr_result != DeployResult.PR_CREATED:
+        msg = f"dry-run did not create PR (result={dr_result}) — check deploy.log"
         log.error(msg)
         update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
         return cp_release
+
+    # ----------------------------------------------------------------- step 8c
+    # amgctl create (no --dry-run) → merges the PR and submits deploy job
+    log.info("Running amgctl create (merge+deploy) for %s", player_name)
+    create_res = playout_create(cp_release, player_dir)
+    _append(
+        f"amgctl cp app playout create -r {cp_release} -i {player_dir}",
+        strip_ansi(create_res.stdout + create_res.stderr),
+    )
 
     log.info("PR created for %s — waiting for pod to reach Running state...", player_name)
 
