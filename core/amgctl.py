@@ -62,13 +62,14 @@ def _run(cmd: List[str], env: Optional[Dict] = None, timeout: int = 120) -> subp
     )
 
 
+_SEP = "-" * 60
+
 def _amgctl(*args: str, env: Optional[Dict] = None, timeout: int = 120) -> subprocess.CompletedProcess:
     cmd_str = "amgctl " + " ".join(args)
-    _log.info("Running: %s", cmd_str)
+    _log.info("%s\nRunning: %s", _SEP, cmd_str)
     result = _run([str(AMGCTL_BIN)] + list(args), env=env, timeout=timeout)
     output = strip_ansi(result.stdout + result.stderr).strip()
-    if output:
-        _log.info("Output [%s]:\n%s", cmd_str, output)
+    _log.info("Output:\n%s\n%s", output or "(empty)", _SEP)
     return result
 
 
@@ -320,7 +321,7 @@ def poll_playout_logs(
     deadline = time.time() + timeout_seconds
     full_log = ""
 
-    _log.info("Running: amgctl cp app playout logs -n %s (streaming until terminal condition)", player_name)
+    _log.info("%s\nRunning: amgctl cp app playout logs -n %s (streaming)", _SEP, player_name)
 
     proc = subprocess.Popen(
         [str(AMGCTL_BIN), "cp", "app", "playout", "logs", "-n", player_name],
@@ -351,7 +352,7 @@ def poll_playout_logs(
                     _log.info("[logs:%s] %s", player_name, clean_line)
                 result = _check(strip_ansi(full_log))
                 if result:
-                    _log.info("Terminal condition for %s: %s", player_name, result)
+                    _log.info("Terminal condition for %s: %s\n%s", player_name, result, _SEP)
                     return result, strip_ansi(full_log)
             elif proc.poll() is not None:
                 break

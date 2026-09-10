@@ -213,9 +213,14 @@ def _cleanup() -> None:
     log.info("Daemon stopped")
 
 
+LOG_PATH = Path.home() / ".chartools" / "daemon.log"
+
 def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%Y-%m-%dT%H:%M:%S"
+    logging.basicConfig(level=logging.INFO, format=fmt, datefmt=datefmt)
+    fh = logging.FileHandler(str(LOG_PATH))
+    fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    logging.getLogger().addHandler(fh)
+    logging.getLogger().info("Logging to %s", LOG_PATH)
