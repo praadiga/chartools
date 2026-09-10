@@ -367,22 +367,25 @@ def poll_playout_logs(
         if LOG_FATAL             in text: return DeployResult.FATAL
         return None
 
+    found_result: Optional[str] = None
+
     try:
         while time.time() < deadline:
             remaining = max(0.1, deadline - time.time())
             ready, _, _ = _select.select([proc.stdout], [], [], min(10.0, remaining))
             if ready:
                 line = proc.stdout.readline()
-                if not line:        # EOF — process exited
+                if not line:        # EOF — process exited naturally
                     break
                 full_log += line
                 clean_line = strip_ansi(line).rstrip()
                 if clean_line:
                     _log.info("[logs:%s] %s", player_name, clean_line)
-                result = _check(strip_ansi(full_log))
-                if result:
-                    _log.info("Terminal condition for %s: %s\n%s", player_name, result, _SEP)
-                    return result, strip_ansi(full_log)
+                if found_result is None:
+                    found_result = _check(strip_ansi(full_log))
+                    if found_result:
+                        _log.info("Terminal condition for %s: %s — draining until container exits",
+                                  player_name, found_result)
             elif proc.poll() is not None:
                 break
     finally:
@@ -402,4 +405,6 @@ def poll_playout_logs(
         pass
 
     clean = strip_ansi(full_log)
-    return _check(clean) or DeployResult.TIMEOUT, clean
+    result = found_result or _check(clean) or DeployResult.TIMEOUT
+    _log.info("Log stream ended for %s — result: %s\n%s", player_name, result, _SEP)
+    return result, clean

@@ -233,12 +233,28 @@ def _deploy_testcase(
     # amgctl create (no --dry-run) → merges the PR and submits deploy job
     log.info("Running amgctl create (merge+deploy) for %s", player_name)
     create_res = playout_create(cp_release, player_dir)
-    _append(
-        f"amgctl cp app playout create -r {cp_release} -i {player_dir}",
-        strip_ansi(create_res.stdout + create_res.stderr),
-    )
+    create_output = strip_ansi(create_res.stdout + create_res.stderr)
+    _append(f"amgctl cp app playout create -r {cp_release} -i {player_dir}", create_output)
 
-    log.info("PR created for %s — waiting for pod to reach Running state...", player_name)
+    if create_res.returncode != 0:
+        msg = f"amgctl create failed (rc={create_res.returncode}) — check deploy.log"
+        log.error("%s\n%s", msg, create_output.strip()[-300:])
+        update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
+        return cp_release
+
+    # ----------------------------------------------------------------- step 8d
+    # stream logs for actual deploy until container exits
+    log.info("Polling amgctl logs for %s (actual deploy)...", player_name)
+    deploy_result, deploy_log = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [deploy]", deploy_log)
+
+    if deploy_result == DeployResult.FATAL:
+        msg = f"deploy failed — check deploy.log"
+        log.error(msg)
+        update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
+        return cp_release
+
+    log.info("Deploy submitted for %s — waiting for pod to reach Running state...", player_name)
 
     # ----------------------------------------------------------------- step 9 (kubectl poll)
     reached = wait_for_pod_running(kubectl_ns, pod_name, timeout=1200)
