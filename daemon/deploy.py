@@ -120,6 +120,12 @@ def _deploy_testcase(
     player_dir  = ts_dir / player_name
     log_dir     = ts_dir / "logs" / player_name
     log_dir.mkdir(parents=True, exist_ok=True)
+    deploy_log  = log_dir / "deploy.log"
+
+    def _append(label: str, output: str) -> None:
+        sep = "-" * 60
+        with open(deploy_log, "a") as _f:
+            _f.write(f"\n{sep}\n{label}\n{sep}\n{output}\n")
 
     # Write DEPLOYING to status.yaml (add run entry if fresh)
     _ensure_run_entry(ts_dir, tc.name, player_name, headend_id)
@@ -136,8 +142,10 @@ def _deploy_testcase(
             get_output = playout_get(cfg.reference_player, player_dir)
         except (AmgctlError, Exception) as e:
             log.error("amgctl get failed: %s", e)
+            _append(f"amgctl cp app playout get -n {cfg.reference_player}", str(e))
             update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=str(e))
             return cp_release
+        _append(f"amgctl cp app playout get -n {cfg.reference_player}", get_output)
 
     # Derive cp_release if not yet known — parse from amgctl get output / exported files
     if cp_release is None:
@@ -177,16 +185,15 @@ def _deploy_testcase(
     # amgctl create
     log.info("Running amgctl create for %s (cp_release=%s)", player_name, cp_release)
     create_res = playout_create(cp_release, player_dir)
-    create_log = strip_ansi(create_res.stdout + create_res.stderr)
-    (log_dir / "deploy.log").write_text(create_log)
+    _append(
+        f"amgctl cp app playout create -r {cp_release} -i {player_dir}",
+        strip_ansi(create_res.stdout + create_res.stderr),
+    )
 
     # ----------------------------------------------------------------- step 9 (log poll)
     log.info("Polling amgctl logs for %s...", player_name)
     result, full_log = poll_playout_logs(player_name)
-    # append log poll output
-    with open(log_dir / "deploy.log", "a") as f:
-        f.write("\n--- log poll ---\n")
-        f.write(full_log)
+    _append(f"amgctl cp app playout logs -n {player_name}", full_log)
 
     if result == DeployResult.ALREADY_EXISTS:
         msg = ("player already exists in cloud — destroy it first with: "
