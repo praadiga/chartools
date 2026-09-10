@@ -214,21 +214,26 @@ def _parse_list_output(raw: str) -> List[Dict]:
     return entries
 
 
-def list_playout(namespace: str, feed_id: str) -> List[Dict]:
-    """Return all amgctl list entries matching namespace_feedid_*."""
-    res = _amgctl("cp", "app", "playout", "list", timeout=60)
+def list_playout(namespace: str, headend: str) -> List[Dict]:
+    """Return all amgctl list entries for namespace_headend_* using server-side filter."""
+    # naming: namespace_headend_feed  e.g. hypeus2_661_020
+    prefix = f"{namespace}_{headend}"
+    filter_cue = (
+        f'[for d in deployments if strings.HasPrefix(d.name,"{prefix}") {{d}}]'
+    )
+    res = _amgctl("cp", "app", "playout", "list",
+                  f"--filter-cue={filter_cue}", timeout=60)
     # INFO/auth lines go to stderr — parse stdout only to avoid corrupting JSON
     entries = _parse_list_output(res.stdout)
     if not entries:
-        _log.warning("list_playout: stdout parse returned no entries; stdout=%r",
-                     strip_ansi(res.stdout)[:200])
-    prefix = f"{namespace}_{feed_id}_"
-    return [e for e in entries if str(e.get("name", "")).startswith(prefix)]
+        _log.warning("list_playout: no entries parsed for prefix %s; stdout=%r",
+                     prefix, strip_ansi(res.stdout)[:200])
+    return entries
 
 
-def allocate_headend(namespace: str, feed_id: str) -> str:
-    """Return the lowest free 3-digit headend_id string for namespace_feedid_*."""
-    entries = list_playout(namespace, feed_id)
+def allocate_feed(namespace: str, headend: str) -> str:
+    """Return the lowest free 3-digit feed number for namespace_headend_*."""
+    entries = list_playout(namespace, headend)
     used: set = set()
     for e in entries:
         parts = str(e.get("name", "")).split("_")
@@ -238,21 +243,25 @@ def allocate_headend(namespace: str, feed_id: str) -> str:
             except ValueError:
                 pass
     existing_names = sorted(str(e.get("name", "")) for e in entries)
-    _log.info("Existing feeds for %s_%s: %s", namespace, feed_id,
+    _log.info("Existing players for %s_%s: %s", namespace, headend,
               existing_names if existing_names else "(none found)")
     i = 1
     while i in used:
         i += 1
     chosen = f"{i:03d}"
-    _log.info("Allocating headend %s (used: %s)", chosen,
+    _log.info("Allocating feed %s (used feed numbers: %s)", chosen,
               sorted(used) if used else "(none)")
     return chosen
 
 
-def get_cp_release(namespace: str, feed_id: str, ref_headend: str) -> Optional[str]:
+# keep old name as alias so existing callers don't break
+allocate_headend = allocate_feed
+
+
+def get_cp_release(namespace: str, headend: str, ref_feed: str) -> Optional[str]:
     """Return cp_release for the reference player from amgctl list."""
-    entries = list_playout(namespace, feed_id)
-    ref_name = f"{namespace}_{feed_id}_{ref_headend}"
+    entries = list_playout(namespace, headend)
+    ref_name = f"{namespace}_{headend}_{ref_feed}"
     for e in entries:
         if e.get("name") == ref_name:
             return e.get("release")
