@@ -24,6 +24,7 @@ LOG_PR_CREATED          = "PR created in Github, PR number"
 LOG_ALREADY_EXISTS      = "already exist in cloud"
 LOG_DEPLOYMENT_RUNNING  = "deployment is in running state"
 LOG_NO_CHANGE           = "No changes detected to commit"
+LOG_DEPLOY_SUCCEEDED    = "Deployment succeeded"
 LOG_FATAL               = "FATAL"
 
 
@@ -31,6 +32,7 @@ class DeployResult:
     PR_CREATED     = "PR_CREATED"
     ALREADY_EXISTS = "ALREADY_EXISTS"
     NO_CHANGE      = "NO_CHANGE"
+    SUCCEEDED      = "SUCCEEDED"
     FATAL          = "FATAL"
     TIMEOUT        = "TIMEOUT"
 
@@ -360,11 +362,12 @@ def poll_playout_logs(
     )
 
     def _check(text: str) -> Optional[str]:
-        if LOG_PR_CREATED        in text: return DeployResult.PR_CREATED
-        if LOG_ALREADY_EXISTS    in text: return DeployResult.ALREADY_EXISTS
+        if LOG_PR_CREATED         in text: return DeployResult.PR_CREATED
+        if LOG_ALREADY_EXISTS     in text: return DeployResult.ALREADY_EXISTS
         if LOG_DEPLOYMENT_RUNNING in text: return DeployResult.ALREADY_EXISTS
-        if LOG_NO_CHANGE         in text: return DeployResult.NO_CHANGE
-        if LOG_FATAL             in text: return DeployResult.FATAL
+        if LOG_NO_CHANGE          in text: return DeployResult.NO_CHANGE
+        if LOG_DEPLOY_SUCCEEDED   in text: return DeployResult.SUCCEEDED
+        if LOG_FATAL              in text: return DeployResult.FATAL
         return None
 
     found_result: Optional[str] = None

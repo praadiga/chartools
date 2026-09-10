@@ -378,8 +378,19 @@ def deploy_testsuite(ts_dir: Path, collect_manager: CollectManager) -> None:
 
     for tc in cfg.testcases:
         log.info("Deploying testcase: %s", tc.name)
-        cp_release = _deploy_testcase(ts_dir, cfg, tc, cp_release, collect_manager)
-        # cp_release carries forward to subsequent testcases in this testsuite
+        try:
+            cp_release = _deploy_testcase(ts_dir, cfg, tc, cp_release, collect_manager)
+        except Exception as e:
+            log.error("Unexpected error deploying testcase %s: %s", tc.name, e, exc_info=True)
+            # mark any run stuck in DEPLOYING as FAILURE so status reflects reality
+            try:
+                state = read_status(ts_dir)
+                for r in state.runs:
+                    if r.status == RunStatus.DEPLOYING and r.testcase == tc.name:
+                        update_run(ts_dir, r.player_name, status=RunStatus.FAILURE,
+                                   error_msg=f"unexpected error: {e}")
+            except Exception:
+                pass
 
     # Recompute testsuite status from run statuses
     try:
