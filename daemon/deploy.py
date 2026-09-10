@@ -117,8 +117,8 @@ def _deploy_testcase(
     player_name = f"{cfg.ref_namespace}_{cfg.ref_feed_id}_{headend_id}"
     kubectl_ns  = f"{cfg.ref_namespace}-playout"
     pod_name    = f"player-{cfg.ref_namespace}-{cfg.ref_feed_id}-{headend_id}-player-0"
-    player_dir  = ts_dir / player_name
-    log_dir     = ts_dir / "logs" / player_name
+    player_dir  = ts_dir / tc.name / player_name
+    log_dir     = ts_dir / tc.name / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     deploy_log  = log_dir / "deploy.log"
 
@@ -230,7 +230,7 @@ def _deploy_testcase(
     log.info("%s is RUNNING — terminates at %s", player_name, terminates_at)
 
     # ----------------------------------------------------------------- step 11
-    collect_manager.start_run(ts_dir, player_name, pod_name, kubectl_ns,
+    collect_manager.start_run(ts_dir, tc.name, player_name, pod_name, kubectl_ns,
                                tc.poll_interval_seconds)
     return cp_release
 

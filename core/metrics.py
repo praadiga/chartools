@@ -165,7 +165,7 @@ def write_run_report(
         "containers":           containers,
     }
 
-    out_path = report_dir / f"{player_name}.json"
+    out_path = report_dir / "report.json"
     with open(out_path, "w") as f:
         json.dump(report, f, indent=2)
     return out_path

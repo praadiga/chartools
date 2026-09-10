@@ -99,7 +99,7 @@ class TerminationScheduler:
         self._collect.stop_run(player_name)
 
         # 2. build container log map → write per-run report
-        log_dir = ts_dir / "logs" / player_name
+        log_dir = ts_dir / run.testcase / "logs"
         container_logs = {}
         if log_dir.exists():
             for p in log_dir.glob("top_*.log"):
@@ -108,7 +108,7 @@ class TerminationScheduler:
 
         try:
             write_run_report(
-                report_dir=ts_dir / "report",
+                report_dir=ts_dir / run.testcase / "report",
                 player_name=player_name,
                 testsuite_id=state.testsuite_id,
                 testcase_name=run.testcase,
@@ -128,7 +128,7 @@ class TerminationScheduler:
             log.info("Destroying playout %s...", player_name)
             destroy_res = playout_destroy(player_name)
             destroy_log = strip_ansi(destroy_res.stdout + destroy_res.stderr)
-            destroy_log_path = ts_dir / "logs" / player_name / "destroy.log"
+            destroy_log_path = ts_dir / run.testcase / "logs" / "destroy.log"
             destroy_log_path.parent.mkdir(parents=True, exist_ok=True)
             destroy_log_path.write_text(destroy_log)
 
@@ -148,10 +148,9 @@ class TerminationScheduler:
         log.info("Run %s marked SUCCESS", player_name)
 
     def _write_summary(self, ts_dir: Path, state) -> None:
-        report_dir = ts_dir / "report"
         run_reports = []
         for run in state.runs:
-            report_path = report_dir / f"{run.player_name}.json"
+            report_path = ts_dir / run.testcase / "report" / "report.json"
             if report_path.exists():
                 import json
                 try:

@@ -160,14 +160,15 @@ def wait_for_pod_running(kubectl_ns: str, pod_name: str, timeout: int = 1200) ->
 def _sync_loop(
     stop_event: threading.Event,
     ts_dir: Path,
+    testcase_name: str,
     player_name: str,
     container: str,
     pod_name: str,
     kubectl_ns: str,
     poll_interval_seconds: int,
 ) -> None:
-    local_log = ts_dir / "logs" / player_name / f"top_{container}.log"
-    events_log = ts_dir / "logs" / player_name / "events.log"
+    local_log = ts_dir / testcase_name / "logs" / f"top_{container}.log"
+    events_log = ts_dir / testcase_name / "logs" / "events.log"
     local_log.parent.mkdir(parents=True, exist_ok=True)
 
     while not stop_event.is_set():
@@ -250,6 +251,7 @@ class CollectManager:
     def start_run(
         self,
         ts_dir: Path,
+        testcase_name: str,
         player_name: str,
         pod_name: str,
         kubectl_ns: str,
@@ -269,7 +271,7 @@ class CollectManager:
 
             t = threading.Thread(
                 target=_sync_loop,
-                args=(collector.stop_event, ts_dir, player_name,
+                args=(collector.stop_event, ts_dir, testcase_name, player_name,
                       container, pod_name, kubectl_ns, poll_interval_seconds),
                 name=f"sync-{player_name}-{container}",
                 daemon=True,
@@ -311,7 +313,7 @@ class CollectManager:
         for container in containers:
             t = threading.Thread(
                 target=_sync_loop,
-                args=(collector.stop_event, ts_dir, run.player_name,
+                args=(collector.stop_event, ts_dir, run.testcase, run.player_name,
                       container, pod_name, kubectl_ns, poll_interval),
                 name=f"sync-{run.player_name}-{container}",
                 daemon=True,
