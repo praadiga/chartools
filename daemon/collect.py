@@ -29,6 +29,9 @@ KUBECONFIG = Path(
                    os.path.expanduser("~/lh_upgrade/k8s_player/kubeconfig.yaml"))
 )
 
+# kubectl binary path — override with CHARTOOLS_KUBECTL env var
+KUBECTL_BIN = os.environ.get("CHARTOOLS_KUBECTL", "kubectl")
+
 SYNC_INTERVAL = 60  # seconds between kubectl cp syncs
 
 # Containers to monitor — checked as regex against pod container names
@@ -60,7 +63,7 @@ _POD_CRASH_ERRORS = ("not found", "container not running", "error from server", 
 
 def _kubectl(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["kubectl", f"--kubeconfig={KUBECONFIG}"] + list(args),
+        [KUBECTL_BIN, f"--kubeconfig={KUBECONFIG}"] + list(args),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,

@@ -20,10 +20,11 @@ _S3_BASE      = "s3://iota-non-prod-artifacts/ieg-core_services"
 _ANSI_RE      = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 # Strings to detect in amgctl logs output
-LOG_PR_CREATED     = "PR created in Github, PR number"
-LOG_ALREADY_EXISTS = "already exist in cloud"
-LOG_NO_CHANGE      = "No changes detected to commit"
-LOG_FATAL          = "FATAL"
+LOG_PR_CREATED          = "PR created in Github, PR number"
+LOG_ALREADY_EXISTS      = "already exist in cloud"
+LOG_DEPLOYMENT_RUNNING  = "deployment is in running state"
+LOG_NO_CHANGE           = "No changes detected to commit"
+LOG_FATAL               = "FATAL"
 
 
 class DeployResult:
@@ -359,10 +360,11 @@ def poll_playout_logs(
     )
 
     def _check(text: str) -> Optional[str]:
-        if LOG_PR_CREATED     in text: return DeployResult.PR_CREATED
-        if LOG_ALREADY_EXISTS in text: return DeployResult.ALREADY_EXISTS
-        if LOG_NO_CHANGE      in text: return DeployResult.NO_CHANGE
-        if LOG_FATAL          in text: return DeployResult.FATAL
+        if LOG_PR_CREATED        in text: return DeployResult.PR_CREATED
+        if LOG_ALREADY_EXISTS    in text: return DeployResult.ALREADY_EXISTS
+        if LOG_DEPLOYMENT_RUNNING in text: return DeployResult.ALREADY_EXISTS
+        if LOG_NO_CHANGE         in text: return DeployResult.NO_CHANGE
+        if LOG_FATAL             in text: return DeployResult.FATAL
         return None
 
     try:
