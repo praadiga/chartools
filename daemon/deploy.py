@@ -216,8 +216,8 @@ def _deploy_testcase(
     # ----------------------------------------------------------------- step 8b
     # poll logs until PR is created (or fails)
     log.info("Polling amgctl logs for %s (dry-run — waiting for PR creation)...", player_name)
-    dr_result, dr_log = poll_playout_logs(player_name)
-    _append(f"amgctl cp app playout logs -n {player_name} [dry-run]", dr_log)
+    dr_result, dr_log_text = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [dry-run]", dr_log_text)
 
     if dr_result == DeployResult.ALREADY_EXISTS:
         msg = ("player already exists in cloud — destroy it first with: "
@@ -250,8 +250,8 @@ def _deploy_testcase(
     # ----------------------------------------------------------------- step 8d
     # stream logs for actual deploy until container exits
     log.info("Polling amgctl logs for %s (actual deploy)...", player_name)
-    deploy_result, deploy_log = poll_playout_logs(player_name)
-    _append(f"amgctl cp app playout logs -n {player_name} [deploy]", deploy_log)
+    deploy_result, deploy_log_text = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [deploy]", deploy_log_text)
 
     if deploy_result == DeployResult.FATAL:
         msg = f"deploy failed — check deploy.log"
