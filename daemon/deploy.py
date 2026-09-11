@@ -8,15 +8,16 @@ Testcases within a testsuite are deployed serially.
 import logging
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from core.amgctl import (
     AmgctlError, DeployResult,
     allocate_headend, extract_cp_release,
-    playout_create, playout_create_dryrun, playout_get,
-    poll_playout_logs, strip_ansi,
+    playout_create, playout_create_dryrun,
+    playout_update, playout_update_dryrun,
+    playout_get, poll_playout_logs, strip_ansi,
 )
 from core.config import TestcaseConfig, TestsuiteConfig, load_config
 from core.status import (
@@ -25,7 +26,7 @@ from core.status import (
     update_testsuite_status, write_status, TestsuiteState,
 )
 from core.topology import patch_coreservice, patch_topology
-from daemon.collect import CollectManager, wait_for_pod_running
+from daemon.collect import CollectManager
 
 log = logging.getLogger(__name__)
 
@@ -254,31 +255,86 @@ def _deploy_testcase(
         update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
         return cp_release
 
-    log.info("Deploy submitted for %s — waiting for pod to reach Running state...", player_name)
+    log.info("Deploy submitted for %s — handing off to monitor thread", player_name)
 
-    # ----------------------------------------------------------------- step 9 (kubectl poll)
-    reached = wait_for_pod_running(kubectl_ns, pod_name, timeout=1200)
-    if not reached:
-        msg = f"pod {pod_name} did not reach Running state within 20 min"
+    # ----------------------------------------------------------------- step 9
+    # Deploy thread is done — monitor thread takes over: polls pod status, injects
+    # scripts once Running, then syncs top logs.
+    collect_manager.start_run(ts_dir, tc.name, player_name, pod_name, kubectl_ns,
+                               tc.poll_interval_seconds, tc.num_days)
+    return cp_release
+
+
+def _update_testcase(
+    ts_dir: Path,
+    cfg,
+    tc,
+    cp_release: str,
+    collect_manager: CollectManager,
+    player_name: str,
+) -> None:
+    """
+    amgctl update flow for a player whose pod was deployed but is CrashLoop/Pending.
+    No review gate — user already fixed topology.yaml and explicitly triggered retry.
+    """
+    headend_id  = player_name.split("_")[2]
+    kubectl_ns  = f"{cfg.ref_namespace}-playout"
+    pod_name    = f"player-{cfg.ref_namespace}-{cfg.ref_feed_id}-{headend_id}-player-0"
+    player_dir  = ts_dir / tc.name / player_name
+    log_dir     = ts_dir / tc.name / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    deploy_log  = log_dir / "deploy.log"
+
+    def _append(label: str, output: str) -> None:
+        sep = "-" * 60
+        with open(deploy_log, "a") as _f:
+            _f.write(f"\n{sep}\n{label}\n{sep}\n{output}\n")
+
+    update_run(ts_dir, player_name, status=RunStatus.DEPLOYING)
+
+    # amgctl update --dry-run → creates GitHub PR
+    log.info("Running amgctl update --dry-run for %s (cp_release=%s)", player_name, cp_release)
+    dryrun_res = playout_update_dryrun(cp_release, player_dir)
+    _append(
+        f"amgctl cp app playout update -r {cp_release} -i {player_dir} --dry-run",
+        strip_ansi(dryrun_res.stdout + dryrun_res.stderr),
+    )
+
+    log.info("Polling amgctl logs for %s (update dry-run)...", player_name)
+    dr_result, dr_log = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [update dry-run]", dr_log)
+
+    if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE):
+        msg = f"update dry-run did not create PR (result={dr_result}) — check deploy.log"
         log.error(msg)
         update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
-        return cp_release
+        return
 
-    # ----------------------------------------------------------------- step 10
-    now = datetime.now(timezone.utc)
-    terminates_at = (now + timedelta(days=tc.num_days)).isoformat()
-    update_run(
-        ts_dir, player_name,
-        status=RunStatus.RUNNING,
-        started_at=now.isoformat(),
-        terminates_at=terminates_at,
-    )
-    log.info("%s is RUNNING — terminates at %s", player_name, terminates_at)
+    # amgctl update (merge PR + submit deploy)
+    log.info("Running amgctl update (merge+deploy) for %s", player_name)
+    update_res = playout_update(cp_release, player_dir)
+    update_output = strip_ansi(update_res.stdout + update_res.stderr)
+    _append(f"amgctl cp app playout update -r {cp_release} -i {player_dir}", update_output)
 
-    # ----------------------------------------------------------------- step 11
+    if update_res.returncode != 0:
+        msg = f"amgctl update failed (rc={update_res.returncode}) — check deploy.log"
+        log.error("%s\n%s", msg, update_output.strip()[-300:])
+        update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
+        return
+
+    log.info("Polling amgctl logs for %s (update deploy)...", player_name)
+    deploy_result, deploy_log_text = poll_playout_logs(player_name)
+    _append(f"amgctl cp app playout logs -n {player_name} [update deploy]", deploy_log_text)
+
+    if deploy_result == DeployResult.FATAL:
+        msg = "update deploy failed — check deploy.log"
+        log.error(msg)
+        update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
+        return
+
+    log.info("Update submitted for %s — handing off to monitor thread", player_name)
     collect_manager.start_run(ts_dir, tc.name, player_name, pod_name, kubectl_ns,
-                               tc.poll_interval_seconds)
-    return cp_release
+                               tc.poll_interval_seconds, tc.num_days)
 
 
 def _ensure_run_entry(
@@ -432,10 +488,18 @@ def retry_testsuite(ts_dir: Path, collect_manager: CollectManager) -> None:
             log.warning("Testcase '%s' not found in config — skipping retry", run.testcase)
             continue
 
-        log.info("Retrying testcase: %s (player %s)", run.testcase, run.player_name)
-        cp_release = _deploy_testcase(
-            ts_dir, cfg, tc, cp_release, collect_manager, is_retry=True
-        )
+        if run.pod_status is not None:
+            # Pod was deployed but K8s reports a problem — use amgctl update
+            log.info("Retrying %s via amgctl update (pod_status=%s)",
+                     run.player_name, run.pod_status)
+            _update_testcase(ts_dir, cfg, tc, cp_release, collect_manager, run.player_name)
+        else:
+            # Pre-deploy failure — re-run amgctl create with existing files
+            log.info("Retrying testcase: %s (player %s) via amgctl create",
+                     run.testcase, run.player_name)
+            cp_release = _deploy_testcase(
+                ts_dir, cfg, tc, cp_release, collect_manager, is_retry=True
+            )
 
     try:
         state = read_status(ts_dir)

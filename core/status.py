@@ -15,14 +15,15 @@ CHARACTERIZATION_BASE = Path(
 
 
 class RunStatus:
-    INITIATED  = "INITIATED"
-    DEPLOYING  = "DEPLOYING"
-    PENDING    = "PENDING"
-    RUNNING    = "RUNNING"
-    FAILURE    = "FAILURE"
-    SUCCESS    = "SUCCESS"
-    TERMINATED = "TERMINATED"
-    CANCELLED  = "CANCELLED"
+    INITIATED    = "INITIATED"
+    DEPLOYING    = "DEPLOYING"
+    PENDING      = "PENDING"
+    PROVISIONING = "PROVISIONING"  # amgctl done, waiting for pod to reach Running
+    RUNNING      = "RUNNING"
+    FAILURE      = "FAILURE"
+    SUCCESS      = "SUCCESS"
+    TERMINATED   = "TERMINATED"
+    CANCELLED    = "CANCELLED"
 
 
 class TestsuiteStatus:
@@ -44,6 +45,8 @@ class RunState:
     samples_collected: int = 0
     crash_events: int = 0
     error_msg: Optional[str] = None
+    pod_status: Optional[str] = None    # last kubectl pod phase/reason e.g. "Pending/CrashLoopBackOff"
+    status_since: Optional[str] = None  # ISO timestamp of last status change
 
 
 @dataclass
@@ -91,7 +94,13 @@ def write_status(testsuite_dir: Path, state: TestsuiteState) -> None:
 
 
 def update_run(testsuite_dir: Path, player_name: str, **kwargs: Any) -> None:
-    """Atomically update fields on a single run entry."""
+    """Atomically update fields on a single run entry.
+
+    Automatically sets status_since to now whenever the status field changes.
+    """
+    from datetime import datetime, timezone
+    if "status" in kwargs and "status_since" not in kwargs:
+        kwargs["status_since"] = datetime.now(timezone.utc).isoformat()
     path = _status_path(testsuite_dir)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
     with os.fdopen(fd, "r+") as f:

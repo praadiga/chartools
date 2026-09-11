@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict
 
 from core.amgctl import ensure_amgctl
-from core.status import RunStatus, read_status, scan_all_testsuites
+from core.status import RunStatus, read_status, scan_all_testsuites, update_run
 from daemon.collect import CollectManager
 from daemon.deploy import deploy_testsuite
 from daemon.terminate import TerminationScheduler
@@ -76,6 +76,24 @@ class Daemon:
                         log.info("Reattached %s", run.player_name)
                     except Exception as e:
                         log.error("Reattach failed for %s: %s", run.player_name, e)
+                elif run.status == RunStatus.PROVISIONING:
+                    # amgctl already done; pod still coming up — restart monitor from phase 1
+                    try:
+                        from core.config import load_config
+                        cfg = load_config(ts_dir / "config.yaml")
+                        tc = next((t for t in cfg.testcases if t.name == run.testcase), None)
+                        if tc:
+                            parts = run.player_name.split("_", 2)
+                            pod_name = f"player-{parts[0]}-{parts[1]}-{parts[2]}-player-0"
+                            kubectl_ns = f"{parts[0]}-playout"
+                            self._collect.start_run(
+                                ts_dir, run.testcase, run.player_name, pod_name, kubectl_ns,
+                                tc.poll_interval_seconds, tc.num_days,
+                            )
+                            log.info("Restarted monitor thread for PROVISIONING run %s",
+                                     run.player_name)
+                    except Exception as e:
+                        log.error("Could not restart monitor for %s: %s", run.player_name, e)
                 elif run.status == RunStatus.DEPLOYING:
                     # Daemon restarted mid-deploy — we can't recover the deploy
                     # thread, so mark it FAILURE so it can be retried.

@@ -2,11 +2,12 @@
 Per-run metrics collection.
 
 Responsibilities:
-  - Inject collect_top.sh into each monitored container after pod is Running
-  - Run a sync thread per container that kubectl-cp's top logs to the server every 60s
-  - Detect pod/container crashes, wait for recovery, re-inject script
-  - Allow terminate.py to stop all threads for a run
-  - On daemon restart, re-attach sync threads without re-injecting (container kept writing)
+  - Single monitor thread per player (_monitor_loop) with three phases:
+      Phase 1: poll kubectl every POD_STATUS_INTERVAL seconds until Running
+      Phase 2: inject collect_top.sh into monitored containers; mark RUNNING
+      Phase 3: sync top logs every SYNC_INTERVAL; detect crashes; loop back to 1
+  - On daemon restart, reattach_run skips phases 1+2 and goes straight to phase 3
+  - Allow terminate.py to stop the monitor thread for a run
 """
 
 import logging
@@ -16,10 +17,11 @@ import subprocess
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core.status import RunState, update_run
+from core.status import RunState, RunStatus, read_status, update_run
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +34,8 @@ KUBECONFIG = Path(
 # kubectl binary path — override with CHARTOOLS_KUBECTL env var
 KUBECTL_BIN = os.environ.get("CHARTOOLS_KUBECTL", "kubectl")
 
-SYNC_INTERVAL = 60  # seconds between kubectl cp syncs
+SYNC_INTERVAL = 60          # seconds between kubectl cp syncs (phase 3)
+POD_STATUS_INTERVAL = 30    # seconds between pod status polls (phase 1)
 
 # Containers to monitor — checked as regex against pod container names
 MONITORED_PATTERNS = [r"^player1$", r".*tardis.*", r".*vanxio.*"]
@@ -53,8 +56,6 @@ echo $! > /mnt/top_${CONTAINER}.pid
 """
 
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-
-_POD_CRASH_ERRORS = ("not found", "container not running", "error from server", "not running")
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +89,27 @@ def get_monitored_containers(kubectl_ns: str, pod_name: str) -> List[str]:
     return matched
 
 
-def _is_pod_crash_error(stderr: str) -> bool:
-    lower = stderr.lower()
-    return any(kw in lower for kw in _POD_CRASH_ERRORS)
+def _get_pod_status(kubectl_ns: str, pod_name: str) -> str:
+    """
+    Return a short status string for the pod, e.g. "Running", "Pending/CrashLoopBackOff".
+    Returns "Unknown/<error>" when kubectl fails.
+    """
+    res = _kubectl(
+        "get", "pod", pod_name, "-n", kubectl_ns,
+        "-o", "jsonpath={.status.phase},{.status.containerStatuses[0].state.waiting.reason}",
+    )
+    if res.returncode != 0:
+        err = res.stderr.strip()[:60]
+        return f"Unknown/{err}" if err else "Unknown"
+    out = res.stdout.strip()
+    if not out:
+        return "Unknown"
+    parts = out.split(",", 1)
+    phase = parts[0].strip() or "Unknown"
+    reason = (parts[1].strip() if len(parts) > 1 else "").strip("\"'")
+    if reason and reason not in ("null", ""):
+        return f"{phase}/{reason}"
+    return phase
 
 
 def _inject_script(kubectl_ns: str, pod_name: str, container: str,
@@ -100,20 +119,17 @@ def _inject_script(kubectl_ns: str, pod_name: str, container: str,
         f.write(COLLECT_TOP_SCRIPT)
         script_path = f.name
     try:
-        # copy script to pod
         res = _kubectl("cp", "-n", kubectl_ns, "-c", container,
                        script_path,
                        f"{kubectl_ns}/{pod_name}:/mnt/collect_top.sh")
         if res.returncode != 0:
             raise RuntimeError(f"kubectl cp script failed: {res.stderr.strip()}")
 
-        # chmod +x
         res = _kubectl("exec", "-n", kubectl_ns, pod_name, "-c", container,
                        "--", "chmod", "+x", "/mnt/collect_top.sh")
         if res.returncode != 0:
             raise RuntimeError(f"chmod failed: {res.stderr.strip()}")
 
-        # start in background
         cmd = f"/mnt/collect_top.sh {container} {poll_interval_seconds}"
         res = _kubectl("exec", "-n", kubectl_ns, pod_name, "-c", container,
                        "--", "/bin/sh", "-c", cmd)
@@ -137,8 +153,7 @@ def _count_samples(log_path: Path) -> int:
 
 
 def _log_event(events_log: Path, event: str, detail: str) -> None:
-    import datetime
-    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    ts = datetime.now(timezone.utc).isoformat()
     events_log.parent.mkdir(parents=True, exist_ok=True)
     with open(events_log, "a") as f:
         f.write(f"{ts} {event} {detail}\n")
@@ -157,76 +172,118 @@ def wait_for_pod_running(kubectl_ns: str, pod_name: str, timeout: int = 1200) ->
 
 
 # ---------------------------------------------------------------------------
-# Sync thread
+# Monitor loop (single thread per player)
 # ---------------------------------------------------------------------------
 
-def _sync_loop(
+def _monitor_loop(
     stop_event: threading.Event,
     ts_dir: Path,
     testcase_name: str,
     player_name: str,
-    container: str,
     pod_name: str,
     kubectl_ns: str,
     poll_interval_seconds: int,
+    num_days: int,
+    skip_to_sync: bool = False,
 ) -> None:
-    local_log = ts_dir / testcase_name / "logs" / f"top_{container}.log"
+    """
+    Single monitoring thread per player.
+
+    Phase 1: Poll pod status every POD_STATUS_INTERVAL until Running (no timeout).
+    Phase 2: Inject collect_top.sh; mark run as RUNNING.
+    Phase 3: Sync top logs every SYNC_INTERVAL; check pod health; loop back to
+             Phase 1 on crash.
+
+    skip_to_sync=True skips phases 1+2 (used on daemon restart for already-Running pods).
+    """
     events_log = ts_dir / testcase_name / "logs" / "events.log"
-    local_log.parent.mkdir(parents=True, exist_ok=True)
 
-    while not stop_event.is_set():
-        try:
-            res = _kubectl("cp", "-n", kubectl_ns, "-c", container,
-                           f"{kubectl_ns}/{pod_name}:/mnt/top_{container}.log",
-                           str(local_log))
-            if res.returncode != 0:
-                stderr_lower = res.stderr.lower()
-                if any(kw in stderr_lower for kw in _POD_CRASH_ERRORS):
-                    raise _ContainerCrash(res.stderr.strip())
-                log.warning("kubectl cp non-fatal error for %s/%s: %s",
-                            pod_name, container, res.stderr.strip())
-            else:
-                count = _count_samples(local_log)
-                update_run(ts_dir, player_name, samples_collected=count)
+    def _wait_running() -> bool:
+        """Poll until Running. Returns False if stop_event fires first."""
+        log.info("Phase 1: waiting for pod %s to reach Running state", pod_name)
+        while not stop_event.is_set():
+            pod_status = _get_pod_status(kubectl_ns, pod_name)
+            update_run(ts_dir, player_name, pod_status=pod_status)
+            if pod_status.startswith("Running"):
+                log.info("Pod %s reached Running state", pod_name)
+                return True
+            log.info("Pod %s: %s", pod_name, pod_status)
+            stop_event.wait(POD_STATUS_INTERVAL)
+        return False
 
-        except _ContainerCrash as e:
-            log.warning("Crash detected for %s/%s: %s", pod_name, container, e)
-            _log_event(events_log, "CRASH", f"{container}: {e}")
-
-            # read current crash_events count and increment
+    def _inject_and_mark_running(containers: List[str]) -> None:
+        """Phase 2: inject scripts and flip status to RUNNING."""
+        log.info("Phase 2: injecting collect_top.sh into %s (%d containers)",
+                 pod_name, len(containers))
+        for container in containers:
             try:
-                from core.status import read_status
+                _inject_script(kubectl_ns, pod_name, container, poll_interval_seconds)
+            except Exception as e:
+                log.error("Inject failed for %s/%s: %s", pod_name, container, e)
+
+        now = datetime.now(timezone.utc)
+        terminates_at = (now + timedelta(days=num_days)).isoformat()
+        update_run(ts_dir, player_name,
+                   status=RunStatus.RUNNING,
+                   started_at=now.isoformat(),
+                   terminates_at=terminates_at,
+                   pod_status="Running")
+        log.info("%s is now RUNNING — terminates at %s", player_name, terminates_at)
+
+    # --- initial setup ---
+    if not skip_to_sync:
+        if not _wait_running():
+            return
+        containers = get_monitored_containers(kubectl_ns, pod_name)
+        if not containers:
+            log.warning("No monitored containers found in %s", pod_name)
+        _inject_and_mark_running(containers)
+    else:
+        containers = get_monitored_containers(kubectl_ns, pod_name)
+        log.info("Reattached to %s, containers: %s", pod_name, containers)
+
+    # --- Phase 3: sync loop ---
+    log.info("Phase 3: sync loop for %s (every %ds)", player_name, SYNC_INTERVAL)
+    while not stop_event.is_set():
+        # sync top logs from each container
+        for container in containers:
+            local_log = ts_dir / testcase_name / "logs" / f"top_{container}.log"
+            try:
+                res = _kubectl("cp", "-n", kubectl_ns, "-c", container,
+                               f"{kubectl_ns}/{pod_name}:/mnt/top_{container}.log",
+                               str(local_log))
+                if res.returncode == 0:
+                    count = _count_samples(local_log)
+                    update_run(ts_dir, player_name, samples_collected=count)
+                else:
+                    log.warning("kubectl cp failed for %s/%s: %s",
+                                pod_name, container, res.stderr.strip())
+            except Exception as e:
+                log.error("Sync error for %s/%s: %s", pod_name, container, e)
+
+        # check pod health
+        pod_status = _get_pod_status(kubectl_ns, pod_name)
+        update_run(ts_dir, player_name, pod_status=pod_status)
+
+        if not pod_status.startswith("Running"):
+            log.warning("Pod %s no longer Running: %s — waiting for recovery",
+                        pod_name, pod_status)
+            _log_event(events_log, "CRASH", f"pod_status={pod_status}")
+            try:
                 state = read_status(ts_dir)
                 for r in state.runs:
                     if r.player_name == player_name:
-                        new_count = r.crash_events + 1
-                        update_run(ts_dir, player_name, crash_events=new_count)
+                        update_run(ts_dir, player_name, crash_events=r.crash_events + 1)
                         break
             except Exception:
                 pass
-
-            log.info("Waiting for pod %s to recover...", pod_name)
-            recovered = wait_for_pod_running(kubectl_ns, pod_name, timeout=1200)
-            if not recovered:
-                log.error("Pod %s did not recover within timeout", pod_name)
-                _log_event(events_log, "RECOVERY_TIMEOUT", pod_name)
-                # keep looping — the scheduler will handle termination
-            else:
-                log.info("Pod %s recovered, re-injecting script into %s", pod_name, container)
-                try:
-                    _inject_script(kubectl_ns, pod_name, container, poll_interval_seconds)
-                    _log_event(events_log, "RECOVERED", container)
-                except Exception as ex:
-                    log.error("Re-inject failed for %s/%s: %s", pod_name, container, ex)
-
-        except Exception as e:
-            log.error("Unexpected error in sync thread %s/%s: %s", pod_name, container, e)
+            # Phase 1 again: wait for recovery
+            if not _wait_running():
+                return
+            # Phase 2 again: re-inject
+            _inject_and_mark_running(containers)
 
         stop_event.wait(SYNC_INTERVAL)
-
-
-class _ContainerCrash(Exception):
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -234,16 +291,16 @@ class _ContainerCrash(Exception):
 # ---------------------------------------------------------------------------
 
 class _RunCollector:
-    """Holds sync threads for a single run."""
+    """Holds the monitor thread for a single run."""
 
     def __init__(self):
         self.stop_event = threading.Event()
-        self.threads: List[threading.Thread] = []
+        self.thread: Optional[threading.Thread] = None
 
     def stop(self) -> None:
         self.stop_event.set()
-        for t in self.threads:
-            t.join(timeout=10)
+        if self.thread:
+            self.thread.join(timeout=10)
 
 
 class CollectManager:
@@ -259,29 +316,25 @@ class CollectManager:
         pod_name: str,
         kubectl_ns: str,
         poll_interval_seconds: int,
+        num_days: int,
     ) -> None:
-        """Inject scripts and start sync threads for a newly Running pod."""
-        containers = get_monitored_containers(kubectl_ns, pod_name)
-        if not containers:
-            log.warning("No monitored containers found in %s", pod_name)
+        """
+        Immediately mark run as PROVISIONING and spawn a monitor thread.
+        The thread handles pod polling, script injection, and log sync.
+        """
+        update_run(ts_dir, player_name, status=RunStatus.PROVISIONING)
 
         collector = _RunCollector()
-        for container in containers:
-            try:
-                _inject_script(kubectl_ns, pod_name, container, poll_interval_seconds)
-            except Exception as e:
-                log.error("Inject failed for %s/%s: %s", pod_name, container, e)
-
-            t = threading.Thread(
-                target=_sync_loop,
-                args=(collector.stop_event, ts_dir, testcase_name, player_name,
-                      container, pod_name, kubectl_ns, poll_interval_seconds),
-                name=f"sync-{player_name}-{container}",
-                daemon=True,
-            )
-            t.start()
-            collector.threads.append(t)
-            log.info("Sync thread started for %s/%s", player_name, container)
+        t = threading.Thread(
+            target=_monitor_loop,
+            args=(collector.stop_event, ts_dir, testcase_name, player_name,
+                  pod_name, kubectl_ns, poll_interval_seconds, num_days, False),
+            name=f"monitor-{player_name}",
+            daemon=True,
+        )
+        collector.thread = t
+        t.start()
+        log.info("Monitor thread started for %s (PROVISIONING)", player_name)
 
         with self._lock:
             self._runs[player_name] = collector
@@ -292,38 +345,35 @@ class CollectManager:
         run: RunState,
     ) -> None:
         """
-        Re-attach sync threads for a RUNNING run after daemon restart.
-        Does NOT re-inject the script — the container has been collecting uninterrupted.
+        Re-attach monitor thread for a RUNNING run after daemon restart.
+        Skips phases 1+2 — pod already Running, script already injected.
         """
-        namespace, feed_id, headend = run.player_name.split("_", 2)
+        parts = run.player_name.split("_", 2)
+        namespace, feed_id, headend = parts[0], parts[1], parts[2]
         pod_name = f"player-{namespace}-{feed_id}-{headend}-player-0"
         kubectl_ns = f"{namespace}-playout"
 
-        # get poll_interval from config.yaml
         try:
             from core.config import load_config
             cfg = load_config(ts_dir / "config.yaml")
             tc = next((t for t in cfg.testcases if t.name == run.testcase), None)
             poll_interval = tc.poll_interval_seconds if tc else 5
+            num_days = tc.num_days if tc else 1
         except Exception:
             poll_interval = 5
-
-        containers = get_monitored_containers(kubectl_ns, pod_name)
-        if not containers:
-            log.warning("No containers found for reattach of %s", run.player_name)
+            num_days = 1
 
         collector = _RunCollector()
-        for container in containers:
-            t = threading.Thread(
-                target=_sync_loop,
-                args=(collector.stop_event, ts_dir, run.testcase, run.player_name,
-                      container, pod_name, kubectl_ns, poll_interval),
-                name=f"sync-{run.player_name}-{container}",
-                daemon=True,
-            )
-            t.start()
-            collector.threads.append(t)
-            log.info("Reattached sync thread for %s/%s", run.player_name, container)
+        t = threading.Thread(
+            target=_monitor_loop,
+            args=(collector.stop_event, ts_dir, run.testcase, run.player_name,
+                  pod_name, kubectl_ns, poll_interval, num_days, True),
+            name=f"monitor-{run.player_name}",
+            daemon=True,
+        )
+        collector.thread = t
+        t.start()
+        log.info("Reattached monitor thread for %s (skip_to_sync)", run.player_name)
 
         with self._lock:
             self._runs[run.player_name] = collector
@@ -333,4 +383,4 @@ class CollectManager:
             collector = self._runs.pop(player_name, None)
         if collector:
             collector.stop()
-            log.info("Stopped sync threads for %s", player_name)
+            log.info("Stopped monitor thread for %s", player_name)

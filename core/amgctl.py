@@ -330,6 +330,18 @@ def playout_destroy(player_name: str) -> subprocess.CompletedProcess:
     return _amgctl("cp", "app", "playout", "destroy", "-n", player_name, "-q", timeout=300)
 
 
+def playout_update_dryrun(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
+    """Update an existing deployment (dry-run — creates the GitHub PR)."""
+    return _amgctl("cp", "app", "playout", "update",
+                   "-r", cp_release, "-i", str(player_dir), "-q", "--dry-run", timeout=300)
+
+
+def playout_update(cp_release: str, player_dir: Path) -> subprocess.CompletedProcess:
+    """Merge the update PR and submit deploy job (must follow playout_update_dryrun)."""
+    return _amgctl("cp", "app", "playout", "update",
+                   "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
+
+
 # ---------------------------------------------------------------------------
 # Log polling
 # ---------------------------------------------------------------------------

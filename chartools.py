@@ -25,6 +25,25 @@ app.add_typer(testsuite_app, name="testsuite")
 console = Console()
 
 
+def _fmt_since(since_iso: Optional[str]) -> str:
+    """Format 'time in current status' as e.g. '5m', '2h30m'."""
+    if not since_iso:
+        return "-"
+    from datetime import datetime, timezone
+    try:
+        since = datetime.fromisoformat(since_iso)
+        delta = int((datetime.now(timezone.utc) - since).total_seconds())
+        if delta < 60:
+            return f"{delta}s"
+        elif delta < 3600:
+            return f"{delta // 60}m"
+        else:
+            h, m = divmod(delta // 60, 60)
+            return f"{h}h{m}m"
+    except Exception:
+        return "-"
+
+
 # ---------------------------------------------------------------------------
 # daemon subcommands
 # ---------------------------------------------------------------------------
@@ -115,7 +134,7 @@ def status(
                 s = read_status(d)
             except Exception:
                 continue
-            running = sum(1 for r in s.runs if r.status == "RUNNING")
+            running = sum(1 for r in s.runs if r.status in ("RUNNING", "PROVISIONING", "DEPLOYING"))
             success = sum(1 for r in s.runs if r.status == "SUCCESS")
             failed  = sum(1 for r in s.runs if r.status == "FAILURE")
             tbl.add_row(s.testsuite_id, s.status, s.created_at[:10],
@@ -137,6 +156,7 @@ def status(
         tbl.add_column("TESTCASE")
         tbl.add_column("PLAYER")
         tbl.add_column("STATUS")
+        tbl.add_column("SINCE")
         tbl.add_column("SAMPLES",  justify="right")
         tbl.add_column("CRASHES",  justify="right")
         tbl.add_column("TERMINATES")
@@ -144,10 +164,14 @@ def status(
 
         for r in s.runs:
             terminates = r.terminates_at[:10] if r.terminates_at else "-"
+            error_col = r.error_msg or ""
+            if r.pod_status and r.status != "RUNNING":
+                error_col = f"[pod:{r.pod_status}] {error_col}".strip()
             tbl.add_row(
                 r.testcase, r.player_name, r.status,
+                _fmt_since(r.status_since),
                 str(r.samples_collected), str(r.crash_events),
-                terminates, r.error_msg or "",
+                terminates, error_col,
             )
         console.print(tbl)
 
