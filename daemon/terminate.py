@@ -160,6 +160,7 @@ class TerminationScheduler:
 
         nodetaint = _get_nodetaint(ts_dir)
         generated_at = datetime.now(timezone.utc).isoformat()
+        report_dir = ts_dir / "report"
         write_summary(report_dir, state.testsuite_id, nodetaint,
                       state.cp_release, generated_at, run_reports)
         log.info("Summary written for testsuite %s", state.testsuite_id)
