@@ -8,6 +8,12 @@ Responsibilities:
       Phase 3: sync top logs every SYNC_INTERVAL; detect crashes; loop back to 1
   - On daemon restart, reattach_run skips phases 1+2 and goes straight to phase 3
   - Allow terminate.py to stop the monitor thread for a run
+
+Logging:
+  - Every pod status change, phase transition, inject result, crash event, and
+    daemon restart event is appended to ts_dir/<testcase>/logs/deploy.log so that
+    file tells the complete story end-to-end.
+  - Python logger (chartools.log) mirrors all of the above for daemon-level context.
 """
 
 import logging
@@ -56,6 +62,7 @@ echo $! > /mnt/top_${CONTAINER}.pid
 """
 
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_SEP = "-" * 60
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +98,7 @@ def get_monitored_containers(kubectl_ns: str, pod_name: str) -> List[str]:
 
 def _get_pod_status(kubectl_ns: str, pod_name: str) -> str:
     """
-    Return a short status string for the pod, e.g. "Running", "Pending/CrashLoopBackOff".
+    Return a short status string: "Running", "Pending/CrashLoopBackOff", etc.
     Returns "Unknown/<error>" when kubectl fails.
     """
     res = _kubectl(
@@ -190,36 +197,67 @@ def _monitor_loop(
     Single monitoring thread per player.
 
     Phase 1: Poll pod status every POD_STATUS_INTERVAL until Running (no timeout).
+             Only logs to deploy.log when status changes.
     Phase 2: Inject collect_top.sh; mark run as RUNNING.
     Phase 3: Sync top logs every SYNC_INTERVAL; check pod health; loop back to
              Phase 1 on crash.
 
-    skip_to_sync=True skips phases 1+2 (used on daemon restart for already-Running pods).
-    """
-    events_log = ts_dir / testcase_name / "logs" / "events.log"
+    skip_to_sync=True skips phases 1+2 (daemon restart for already-Running pods).
 
-    def _wait_running() -> bool:
-        """Poll until Running. Returns False if stop_event fires first."""
-        log.info("Phase 1: waiting for pod %s to reach Running state", pod_name)
+    All pod status changes, phase transitions, inject results, crash events, and
+    daemon restart events are written to deploy.log (in addition to Python logger).
+    """
+    log_dir = ts_dir / testcase_name / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    deploy_log = log_dir / "deploy.log"
+    events_log = log_dir / "events.log"
+
+    def _dlog(label: str, body: str = "") -> None:
+        """Append a timestamped entry to deploy.log."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(deploy_log, "a") as f:
+            if body:
+                f.write(f"\n{_SEP}\n[{ts}] {label}\n{_SEP}\n{body}\n")
+            else:
+                f.write(f"\n{_SEP}\n[{ts}] {label}\n{_SEP}\n")
+
+    def _wait_running(reason: str) -> bool:
+        """
+        Poll kubectl until pod phase == Running.
+        Logs to deploy.log on every status change (not every poll).
+        Returns False if stop_event fires before pod is Running.
+        """
+        _dlog(f"[kubectl] Phase 1 — waiting for {pod_name} to reach Running ({reason})")
+        log.info("Phase 1: waiting for pod %s to reach Running (%s)", pod_name, reason)
+        last_status: Optional[str] = None
         while not stop_event.is_set():
             pod_status = _get_pod_status(kubectl_ns, pod_name)
             update_run(ts_dir, player_name, pod_status=pod_status)
+            if pod_status != last_status:
+                _dlog(f"[kubectl] Pod {pod_name}: {last_status or '(unknown)'} -> {pod_status}")
+                log.info("Pod %s: %s", pod_name, pod_status)
+                last_status = pod_status
             if pod_status.startswith("Running"):
-                log.info("Pod %s reached Running state", pod_name)
                 return True
-            log.info("Pod %s: %s", pod_name, pod_status)
             stop_event.wait(POD_STATUS_INTERVAL)
+        _dlog(f"[kubectl] Phase 1 aborted by stop_event — last pod status: {last_status}")
         return False
 
     def _inject_and_mark_running(containers: List[str]) -> None:
-        """Phase 2: inject scripts and flip status to RUNNING."""
+        """Phase 2: inject collect_top.sh and mark status RUNNING."""
+        _dlog(
+            f"[kubectl] Phase 2 — injecting collect_top.sh into {pod_name}",
+            f"containers: {containers}\npoll_interval_seconds: {poll_interval_seconds}",
+        )
         log.info("Phase 2: injecting collect_top.sh into %s (%d containers)",
                  pod_name, len(containers))
         for container in containers:
             try:
                 _inject_script(kubectl_ns, pod_name, container, poll_interval_seconds)
+                _dlog(f"[kubectl] inject OK -> {pod_name}/{container}")
             except Exception as e:
                 log.error("Inject failed for %s/%s: %s", pod_name, container, e)
+                _dlog(f"[kubectl] inject FAILED -> {pod_name}/{container}", str(e))
 
         now = datetime.now(timezone.utc)
         terminates_at = (now + timedelta(days=num_days)).isoformat()
@@ -228,22 +266,38 @@ def _monitor_loop(
                    started_at=now.isoformat(),
                    terminates_at=terminates_at,
                    pod_status="Running")
+        _dlog(
+            f"[status] {player_name}: PROVISIONING -> RUNNING",
+            f"started_at:    {now.isoformat()}\nterminates_at: {terminates_at}",
+        )
         log.info("%s is now RUNNING — terminates at %s", player_name, terminates_at)
 
-    # --- initial setup ---
+    # -------------------------------------------------------------------------
+    # Initial setup
+    # -------------------------------------------------------------------------
     if not skip_to_sync:
-        if not _wait_running():
+        if not _wait_running("initial deploy"):
             return
         containers = get_monitored_containers(kubectl_ns, pod_name)
         if not containers:
             log.warning("No monitored containers found in %s", pod_name)
+            _dlog(f"[kubectl] WARNING: no monitored containers in {pod_name}")
         _inject_and_mark_running(containers)
     else:
         containers = get_monitored_containers(kubectl_ns, pod_name)
-        log.info("Reattached to %s, containers: %s", pod_name, containers)
+        _dlog(
+            f"[monitor] Reattached after daemon restart (skip_to_sync)",
+            f"pod:        {pod_name}\ncontainers: {containers}",
+        )
+        log.info("Reattached to %s (skip_to_sync), containers: %s", pod_name, containers)
 
-    # --- Phase 3: sync loop ---
+    # -------------------------------------------------------------------------
+    # Phase 3 — sync loop
+    # -------------------------------------------------------------------------
+    _dlog(f"[monitor] Phase 3 — sync loop started (every {SYNC_INTERVAL}s)")
     log.info("Phase 3: sync loop for %s (every %ds)", player_name, SYNC_INTERVAL)
+    last_pod_status = "Running"
+
     while not stop_event.is_set():
         # sync top logs from each container
         for container in containers:
@@ -261,14 +315,22 @@ def _monitor_loop(
             except Exception as e:
                 log.error("Sync error for %s/%s: %s", pod_name, container, e)
 
-        # check pod health
+        # check pod health — only log when status changes
         pod_status = _get_pod_status(kubectl_ns, pod_name)
         update_run(ts_dir, player_name, pod_status=pod_status)
 
+        if pod_status != last_pod_status:
+            _dlog(f"[kubectl] Pod {pod_name}: {last_pod_status} -> {pod_status}")
+            log.info("Pod %s: %s -> %s", pod_name, last_pod_status, pod_status)
+            last_pod_status = pod_status
+
         if not pod_status.startswith("Running"):
-            log.warning("Pod %s no longer Running: %s — waiting for recovery",
-                        pod_name, pod_status)
             _log_event(events_log, "CRASH", f"pod_status={pod_status}")
+            _dlog(
+                f"[kubectl] CRASH — pod {pod_name} is {pod_status}",
+                "Waiting for pod to recover before resuming log collection.",
+            )
+            log.warning("Pod %s no longer Running: %s", pod_name, pod_status)
             try:
                 state = read_status(ts_dir)
                 for r in state.runs:
@@ -278,9 +340,10 @@ def _monitor_loop(
             except Exception:
                 pass
             # Phase 1 again: wait for recovery
-            if not _wait_running():
+            if not _wait_running("crash recovery"):
                 return
-            # Phase 2 again: re-inject
+            last_pod_status = "Running"
+            # Phase 2 again: re-inject (container restarted, script is gone)
             _inject_and_mark_running(containers)
 
         stop_event.wait(SYNC_INTERVAL)
@@ -319,8 +382,9 @@ class CollectManager:
         num_days: int,
     ) -> None:
         """
-        Immediately mark run as PROVISIONING and spawn a monitor thread.
-        The thread handles pod polling, script injection, and log sync.
+        Mark run as PROVISIONING and spawn a monitor thread.
+        The thread handles pod polling (Phase 1), script inject + RUNNING (Phase 2),
+        and top log sync (Phase 3).
         """
         update_run(ts_dir, player_name, status=RunStatus.PROVISIONING)
 

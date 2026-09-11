@@ -151,6 +151,10 @@ def _deploy_testcase(
     update_run(ts_dir, player_name, status=RunStatus.DEPLOYING)
 
     if is_retry:
+        _append(
+            f"=== RETRY (amgctl create) — {player_name} ===",
+            f"Skipping amgctl get — reusing existing files in {player_dir}",
+        )
         log.info("Retry: skipping amgctl get — files already exist at %s", player_dir)
         get_output = ""
     else:
@@ -291,6 +295,10 @@ def _update_testcase(
             _f.write(f"\n{sep}\n{label}\n{sep}\n{output}\n")
 
     update_run(ts_dir, player_name, status=RunStatus.DEPLOYING)
+    _append(
+        f"=== RETRY (amgctl update) — {player_name} ===",
+        f"pod_status was set — pod exists in K8s, using update flow\nplayer_dir: {player_dir}",
+    )
 
     # amgctl update --dry-run → creates GitHub PR
     log.info("Running amgctl update --dry-run for %s (cp_release=%s)", player_name, cp_release)
