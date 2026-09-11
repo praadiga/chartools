@@ -402,7 +402,12 @@ def poll_playout_logs(
         if LOG_DEPLOYMENT_RUNNING in text: return DeployResult.ALREADY_EXISTS
         if LOG_NO_CHANGE          in text: return DeployResult.NO_CHANGE
         if LOG_DEPLOY_SUCCEEDED   in text: return DeployResult.SUCCEEDED
-        if LOG_FATAL              in text: return DeployResult.FATAL
+        if LOG_FATAL              in text:
+            # Auth token expiry prints FATAL but is not a real deploy failure —
+            # return TIMEOUT so the caller can decide rather than marking FAILURE.
+            if "invalid token" in text.lower() or "401" in text:
+                return DeployResult.TIMEOUT
+            return DeployResult.FATAL
         return None
 
     found_result: Optional[str] = None

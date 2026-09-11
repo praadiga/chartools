@@ -143,7 +143,8 @@ class TerminationScheduler:
             dr_result, dr_log = poll_playout_logs(player_name, timeout_seconds=1200)
             _dappend(f"amgctl cp app playout logs -n {player_name} [destroy dry-run]", dr_log)
 
-            if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE):
+            if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE,
+                                 DeployResult.SUCCEEDED):
                 log.warning("Destroy dry-run for %s ended with result=%s — skipping merge",
                             player_name, dr_result)
             else:

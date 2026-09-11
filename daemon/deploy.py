@@ -312,7 +312,8 @@ def _update_testcase(
     dr_result, dr_log = poll_playout_logs(player_name)
     _append(f"amgctl cp app playout logs -n {player_name} [update dry-run]", dr_log)
 
-    if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE):
+    if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE,
+                         DeployResult.SUCCEEDED):
         msg = f"update dry-run did not create PR (result={dr_result}) — check deploy.log"
         log.error(msg)
         update_run(ts_dir, player_name, status=RunStatus.FAILURE, error_msg=msg)
