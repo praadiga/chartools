@@ -34,14 +34,96 @@ log = logging.getLogger(__name__)
 # kubeconfig path — override with CHARTOOLS_KUBECONFIG env var
 KUBECONFIG = Path(
     os.environ.get("CHARTOOLS_KUBECONFIG",
-                   os.path.expanduser("~/lh_upgrade/k8s_player/kubeconfig.yaml"))
+                   os.path.expanduser("~/.kube/config"))
 )
 
 # kubectl binary path — override with CHARTOOLS_KUBECTL env var
 KUBECTL_BIN = os.environ.get("CHARTOOLS_KUBECTL", "kubectl")
 
+# Script that re-establishes the SSH tunnel to the K8s cluster.
+# Override with CHARTOOLS_KUBESETUP env var.
+KUBESETUP_SCRIPT = os.environ.get(
+    "CHARTOOLS_KUBESETUP",
+    os.path.expanduser("~/kubeport_use1.sh"),
+)
+
 SYNC_INTERVAL = 60          # seconds between kubectl cp syncs (phase 3)
 POD_STATUS_INTERVAL = 30    # seconds between pod status polls (phase 1)
+
+# How long to wait between tunnel re-establishment attempts (seconds).
+# Prevents a burst of failing kubectl calls from spamming the script.
+TUNNEL_COOLDOWN = 120
+
+_tunnel_lock = threading.Lock()
+_last_tunnel_attempt: float = 0.0  # epoch seconds of last _ensure_tunnel() call
+
+
+# ---------------------------------------------------------------------------
+# SSH tunnel management
+# ---------------------------------------------------------------------------
+
+_TUNNEL_ERROR_FRAGMENTS = (
+    "connection refused",
+    "dial tcp",
+    "unable to connect",
+    "no route to host",
+    "connection timed out",
+    "i/o timeout",
+    "eof",
+    "transport",
+)
+
+
+def _is_tunnel_error(stderr: str) -> bool:
+    low = stderr.lower()
+    return any(frag in low for frag in _TUNNEL_ERROR_FRAGMENTS)
+
+
+def _ensure_tunnel() -> bool:
+    """
+    Re-establish the SSH tunnel by running KUBESETUP_SCRIPT.
+    Protected by a TUNNEL_COOLDOWN so concurrent failing kubectl calls only
+    trigger one script run.  Returns True if the script exited successfully.
+    """
+    global _last_tunnel_attempt
+    with _tunnel_lock:
+        now = time.time()
+        if now - _last_tunnel_attempt < TUNNEL_COOLDOWN:
+            log.info("Tunnel cooldown active (%.0fs remaining) — skipping re-establishment",
+                     TUNNEL_COOLDOWN - (now - _last_tunnel_attempt))
+            return False
+        _last_tunnel_attempt = now
+
+    if not os.path.exists(KUBESETUP_SCRIPT):
+        log.warning("KUBESETUP_SCRIPT not found at %s — set CHARTOOLS_KUBESETUP env var",
+                    KUBESETUP_SCRIPT)
+        return False
+
+    log.info("kubectl connection failed — re-establishing tunnel via %s", KUBESETUP_SCRIPT)
+    try:
+        res = subprocess.run(
+            ["bash", KUBESETUP_SCRIPT],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            timeout=90,
+        )
+        output = res.stdout.strip()
+        if res.returncode == 0:
+            log.info("Tunnel re-established successfully")
+            if output:
+                log.debug("kubesetup output:\n%s", output[-1000:])
+            time.sleep(2)  # brief pause for tunnel to stabilise
+            return True
+        else:
+            log.error("Tunnel script failed (rc=%d):\n%s", res.returncode, output[-500:])
+            return False
+    except subprocess.TimeoutExpired:
+        log.error("Tunnel script timed out after 90s")
+        return False
+    except Exception as e:
+        log.error("Tunnel script error: %s", e)
+        return False
 
 # Containers to monitor — checked as regex against pod container names
 MONITORED_PATTERNS = [r"^player1$", r".*tardis.*", r".*vanxio.*"]
@@ -70,13 +152,26 @@ _SEP = "-" * 60
 # ---------------------------------------------------------------------------
 
 def _kubectl(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [KUBECTL_BIN, f"--kubeconfig={KUBECONFIG}"] + list(args),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        timeout=timeout,
-    )
+    """
+    Run a kubectl command.  On connection/tunnel failure, re-establishes the
+    SSH tunnel via KUBESETUP_SCRIPT and retries once automatically.
+    """
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [KUBECTL_BIN, f"--kubeconfig={KUBECONFIG}"] + list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+        )
+
+    res = _run()
+    if res.returncode != 0 and _is_tunnel_error(res.stderr):
+        log.warning("kubectl tunnel error: %s", res.stderr.strip()[:120])
+        if _ensure_tunnel():
+            log.info("Retrying kubectl after tunnel re-establishment")
+            res = _run()
+    return res
 
 
 def get_monitored_containers(kubectl_ns: str, pod_name: str) -> List[str]:
