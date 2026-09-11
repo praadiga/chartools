@@ -139,7 +139,7 @@ INTERVAL=$2
     top -b -n 1 >> /mnt/top_${CONTAINER}.log
     sleep ${INTERVAL}
   done
-) &
+) </dev/null >>/mnt/top_${CONTAINER}.log 2>&1 &
 echo $! > /mnt/top_${CONTAINER}.pid
 """
 
