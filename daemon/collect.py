@@ -190,7 +190,7 @@ def _monitor_loop(
     pod_name: str,
     kubectl_ns: str,
     poll_interval_seconds: int,
-    num_days: int,
+    duration_seconds: int,
     skip_to_sync: bool = False,
 ) -> None:
     """
@@ -260,7 +260,7 @@ def _monitor_loop(
                 _dlog(f"[kubectl] inject FAILED -> {pod_name}/{container}", str(e))
 
         now = datetime.now(timezone.utc)
-        terminates_at = (now + timedelta(days=num_days)).isoformat()
+        terminates_at = (now + timedelta(seconds=duration_seconds)).isoformat()
         update_run(ts_dir, player_name,
                    status=RunStatus.RUNNING,
                    started_at=now.isoformat(),
@@ -379,7 +379,7 @@ class CollectManager:
         pod_name: str,
         kubectl_ns: str,
         poll_interval_seconds: int,
-        num_days: int,
+        duration_seconds: int,
     ) -> None:
         """
         Mark run as PROVISIONING and spawn a monitor thread.
@@ -392,7 +392,7 @@ class CollectManager:
         t = threading.Thread(
             target=_monitor_loop,
             args=(collector.stop_event, ts_dir, testcase_name, player_name,
-                  pod_name, kubectl_ns, poll_interval_seconds, num_days, False),
+                  pod_name, kubectl_ns, poll_interval_seconds, duration_seconds, False),
             name=f"monitor-{player_name}",
             daemon=True,
         )
@@ -422,16 +422,16 @@ class CollectManager:
             cfg = load_config(ts_dir / "config.yaml")
             tc = next((t for t in cfg.testcases if t.name == run.testcase), None)
             poll_interval = tc.poll_interval_seconds if tc else 5
-            num_days = tc.num_days if tc else 1
+            duration_seconds = tc.duration_seconds if tc else 86400
         except Exception:
             poll_interval = 5
-            num_days = 1
+            duration_seconds = 86400
 
         collector = _RunCollector()
         t = threading.Thread(
             target=_monitor_loop,
             args=(collector.stop_event, ts_dir, run.testcase, run.player_name,
-                  pod_name, kubectl_ns, poll_interval, num_days, True),
+                  pod_name, kubectl_ns, poll_interval, duration_seconds, True),
             name=f"monitor-{run.player_name}",
             daemon=True,
         )

@@ -114,7 +114,7 @@ class TerminationScheduler:
                 testcase_name=run.testcase,
                 nodetaint=_get_nodetaint(ts_dir),
                 cp_release=state.cp_release,
-                num_days=_get_num_days(ts_dir, run.testcase),
+                duration_seconds=_get_duration_seconds(ts_dir, run.testcase),
                 poll_interval_seconds=_get_poll_interval(ts_dir, run.testcase),
                 crash_events=run.crash_events,
                 container_log_paths=container_logs,
@@ -203,12 +203,12 @@ def _get_nodetaint(ts_dir: Path) -> str:
         return "unknown"
 
 
-def _get_num_days(ts_dir: Path, testcase_name: str) -> int:
+def _get_duration_seconds(ts_dir: Path, testcase_name: str) -> int:
     try:
         from core.config import load_config
         cfg = load_config(ts_dir / "config.yaml")
         tc = next((t for t in cfg.testcases if t.name == testcase_name), None)
-        return tc.num_days if tc else 0
+        return tc.duration_seconds if tc else 0
     except Exception:
         return 0
 

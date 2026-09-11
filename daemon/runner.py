@@ -88,7 +88,7 @@ class Daemon:
                             kubectl_ns = f"{parts[0]}-playout"
                             self._collect.start_run(
                                 ts_dir, run.testcase, run.player_name, pod_name, kubectl_ns,
-                                tc.poll_interval_seconds, tc.num_days,
+                                tc.poll_interval_seconds, tc.duration_seconds,
                             )
                             log.info("Restarted monitor thread for PROVISIONING run %s",
                                      run.player_name)

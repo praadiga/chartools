@@ -265,7 +265,7 @@ def _deploy_testcase(
     # Deploy thread is done — monitor thread takes over: polls pod status, injects
     # scripts once Running, then syncs top logs.
     collect_manager.start_run(ts_dir, tc.name, player_name, pod_name, kubectl_ns,
-                               tc.poll_interval_seconds, tc.num_days)
+                               tc.poll_interval_seconds, tc.duration_seconds)
     return cp_release
 
 
@@ -342,7 +342,7 @@ def _update_testcase(
 
     log.info("Update submitted for %s — handing off to monitor thread", player_name)
     collect_manager.start_run(ts_dir, tc.name, player_name, pod_name, kubectl_ns,
-                               tc.poll_interval_seconds, tc.num_days)
+                               tc.poll_interval_seconds, tc.duration_seconds)
 
 
 def _ensure_run_entry(

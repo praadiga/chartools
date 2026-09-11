@@ -11,11 +11,40 @@ class ConfigError(ValueError):
     pass
 
 
+def _parse_duration(value) -> int:
+    """
+    Parse a human-friendly duration into seconds.
+
+    Accepts:
+      "7d"  → 604800      "2h"  → 7200
+      "30m" → 1800        "5s"  → 5
+      7     → 7  (plain int treated as seconds)
+      "7"   → 7  (plain string int, seconds)
+
+    Raises ConfigError on unrecognised format.
+    """
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    try:
+        if s.endswith("d"):
+            return int(s[:-1]) * 86400
+        if s.endswith("h"):
+            return int(s[:-1]) * 3600
+        if s.endswith("m"):
+            return int(s[:-1]) * 60
+        if s.endswith("s"):
+            return int(s[:-1])
+        return int(s)
+    except ValueError:
+        raise ConfigError(f"Cannot parse duration '{value}' — use e.g. '7d', '2h', '30m', '5s'")
+
+
 @dataclass
 class TestcaseConfig:
     name: str
-    num_days: int
-    poll_interval_seconds: int
+    duration_seconds: int       # total run duration (config key: 'duration', e.g. "7d")
+    poll_interval_seconds: int  # top-log collection interval (config key: 'poll_interval', e.g. "5s")
     license_key: str
     overrides: Dict[str, Any] = field(default_factory=dict)
 
@@ -52,13 +81,26 @@ def load_config(config_path: Path) -> TestsuiteConfig:
 
     testcases: List[TestcaseConfig] = []
     for i, tc in enumerate(raw_testcases):
-        for fname in ("name", "num_days", "poll_interval_seconds", "license_key"):
+        for fname in ("name", "license_key"):
             if tc.get(fname) is None:
                 raise ConfigError(f"testcases[{i}]: '{fname}' is required")
+
+        # duration — accept new key 'duration' or old key 'num_days' for backwards compat
+        raw_duration = tc.get("duration") if tc.get("duration") is not None else tc.get("num_days")
+        if raw_duration is None:
+            raise ConfigError(f"testcases[{i}]: 'duration' is required (e.g. '7d', '12h')")
+
+        # poll_interval — accept new key 'poll_interval' or old key 'poll_interval_seconds'
+        raw_poll = (tc.get("poll_interval")
+                    if tc.get("poll_interval") is not None
+                    else tc.get("poll_interval_seconds"))
+        if raw_poll is None:
+            raise ConfigError(f"testcases[{i}]: 'poll_interval' is required (e.g. '5s', '1m')")
+
         testcases.append(TestcaseConfig(
             name=str(tc["name"]),
-            num_days=int(tc["num_days"]),
-            poll_interval_seconds=int(tc["poll_interval_seconds"]),
+            duration_seconds=_parse_duration(raw_duration),
+            poll_interval_seconds=_parse_duration(raw_poll),
             license_key=str(tc["license_key"]),
             overrides=tc.get("overrides") or {},
         ))

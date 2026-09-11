@@ -134,7 +134,7 @@ def write_run_report(
     testcase_name: str,
     nodetaint: str,
     cp_release: Optional[str],
-    num_days: int,
+    duration_seconds: int,
     poll_interval_seconds: int,
     crash_events: int,
     container_log_paths: Dict[str, Path],  # container_name → top log path
@@ -158,7 +158,7 @@ def write_run_report(
         "player_name":          player_name,
         "nodetaint":            nodetaint,
         "cp_release":           cp_release,
-        "num_days":             num_days,
+        "duration_seconds":      duration_seconds,
         "poll_interval_seconds": poll_interval_seconds,
         "total_samples":        total_samples,
         "crash_events":         crash_events,
