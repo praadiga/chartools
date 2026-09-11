@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from core.amgctl import DeployResult, playout_destroy, poll_playout_logs, strip_ansi
+from core.amgctl import DeployResult, playout_destroy, playout_destroy_dryrun, poll_playout_logs, strip_ansi
 from core.metrics import write_run_report, write_summary
 from core.status import (
     RunStatus, TestsuiteStatus, compute_testsuite_status,
@@ -123,25 +123,50 @@ class TerminationScheduler:
         except Exception as e:
             log.error("Report generation failed for %s: %s", player_name, e)
 
-        # 3. amgctl destroy
-        try:
-            log.info("Destroying playout %s...", player_name)
-            destroy_res = playout_destroy(player_name)
-            destroy_log = strip_ansi(destroy_res.stdout + destroy_res.stderr)
-            destroy_log_path = ts_dir / run.testcase / "logs" / "destroy.log"
-            destroy_log_path.parent.mkdir(parents=True, exist_ok=True)
-            destroy_log_path.write_text(destroy_log)
+        # 3. amgctl destroy (two-step: dry-run creates PR, then merge)
+        sep = "-" * 60
+        destroy_log_path = ts_dir / run.testcase / "logs" / "destroy.log"
+        destroy_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # poll until destroy PR merges
-            result, full_log = poll_playout_logs(player_name, timeout_seconds=1200)
+        def _dappend(label: str, body: str) -> None:
             with open(destroy_log_path, "a") as f:
-                f.write("\n--- destroy log poll ---\n")
-                f.write(full_log)
+                f.write(f"\n{sep}\n{label}\n{sep}\n{body}\n")
 
-            if result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE):
-                log.warning("Destroy for %s ended with result=%s", player_name, result)
+        try:
+            log.info("Destroying playout %s (dry-run)...", player_name)
+            dr_res = playout_destroy_dryrun(player_name)
+            _dappend(
+                f"amgctl cp app playout destroy -n {player_name} -q --dry-run",
+                strip_ansi(dr_res.stdout + dr_res.stderr),
+            )
+
+            dr_result, dr_log = poll_playout_logs(player_name, timeout_seconds=1200)
+            _dappend(f"amgctl cp app playout logs -n {player_name} [destroy dry-run]", dr_log)
+
+            if dr_result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE):
+                log.warning("Destroy dry-run for %s ended with result=%s — skipping merge",
+                            player_name, dr_result)
+            else:
+                log.info("Destroy PR ready for %s — merging...", player_name)
+                destroy_res = playout_destroy(player_name)
+                _dappend(
+                    f"amgctl cp app playout destroy -n {player_name} -q",
+                    strip_ansi(destroy_res.stdout + destroy_res.stderr),
+                )
+
+                result, full_log = poll_playout_logs(player_name, timeout_seconds=1200)
+                _dappend(
+                    f"amgctl cp app playout logs -n {player_name} [destroy]", full_log
+                )
+                if result not in (DeployResult.PR_CREATED, DeployResult.NO_CHANGE,
+                                  DeployResult.SUCCEEDED):
+                    log.warning("Destroy for %s ended with result=%s", player_name, result)
+                else:
+                    log.info("Destroy completed for %s", player_name)
+
         except Exception as e:
             log.error("Destroy failed for %s: %s — marking SUCCESS anyway", player_name, e)
+            _dappend("ERROR", str(e))
 
         # 4. mark run SUCCESS
         update_run(ts_dir, player_name, status=RunStatus.SUCCESS)

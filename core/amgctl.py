@@ -326,7 +326,14 @@ def playout_create(cp_release: str, player_dir: Path) -> subprocess.CompletedPro
                    "-r", cp_release, "-i", str(player_dir), "-q", timeout=300)
 
 
+def playout_destroy_dryrun(player_name: str) -> subprocess.CompletedProcess:
+    """Create the destroy PR (dry-run). Must be called before playout_destroy."""
+    return _amgctl("cp", "app", "playout", "destroy",
+                   "-n", player_name, "-q", "--dry-run", timeout=300)
+
+
 def playout_destroy(player_name: str) -> subprocess.CompletedProcess:
+    """Merge the destroy PR created by playout_destroy_dryrun."""
     return _amgctl("cp", "app", "playout", "destroy", "-n", player_name, "-q", timeout=300)
 
 
