@@ -138,6 +138,9 @@ class Daemon:
             if action == "add":
                 ts_dir = Path(msg["dir"]).resolve()
                 reply  = self._add_testsuite(ts_dir)
+            elif action == "retry":
+                ts_dir = Path(msg["dir"]).resolve()
+                reply  = self._retry_testsuite(ts_dir)
             else:
                 reply = {"ok": False, "error": f"unknown action: {action}"}
 
@@ -172,6 +175,26 @@ class Daemon:
         log.info("Started deploy thread for %s", ts_dir.name)
         return {"ok": True}
 
+    def _retry_testsuite(self, ts_dir: Path) -> dict:
+        if not ts_dir.exists():
+            return {"ok": False, "error": f"directory not found: {ts_dir}"}
+
+        key = f"retry-{ts_dir}"
+        if key in self._deploy_threads and self._deploy_threads[key].is_alive():
+            return {"ok": False, "error": f"{ts_dir.name} retry is already running"}
+
+        from daemon.deploy import retry_testsuite
+        t = threading.Thread(
+            target=retry_testsuite,
+            args=(ts_dir, self._collect),
+            name=f"retry-{ts_dir.name}",
+            daemon=True,
+        )
+        self._deploy_threads[key] = t
+        t.start()
+        log.info("Started retry thread for %s", ts_dir.name)
+        return {"ok": True}
+
     # ------------------------------------------------------------------ signal
 
     def _on_signal(self, signum, frame) -> None:
@@ -183,18 +206,28 @@ class Daemon:
 # Module-level helpers (used by CLI commands too)
 # ---------------------------------------------------------------------------
 
-def send_add(ts_dir: Path) -> dict:
-    """Send 'add' message to running daemon. Returns response dict."""
+def _send(msg: dict) -> dict:
+    """Send a message to the running daemon. Returns response dict."""
     if not SOCKET_PATH.exists():
         raise ConnectionRefusedError(
             "Daemon is not running. Start it with: chartools daemon start"
         )
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(str(SOCKET_PATH))
-    sock.sendall(json.dumps({"action": "add", "dir": str(ts_dir)}).encode())
+    sock.sendall(json.dumps(msg).encode())
     data = sock.recv(4096)
     sock.close()
     return json.loads(data)
+
+
+def send_add(ts_dir: Path) -> dict:
+    """Send 'add' message to running daemon."""
+    return _send({"action": "add", "dir": str(ts_dir)})
+
+
+def send_retry(ts_dir: Path) -> dict:
+    """Send 'retry' message to running daemon."""
+    return _send({"action": "retry", "dir": str(ts_dir)})
 
 
 def is_running() -> bool:

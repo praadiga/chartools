@@ -255,18 +255,26 @@ def terminate(
 def retry(
     directory: Path = typer.Argument(..., help="Testsuite folder"),
 ):
-    """Retry all FAILURE runs in a testsuite (requires daemon to be running)."""
-    from daemon.runner import is_running
+    """Retry all FAILURE runs in a testsuite (dispatches to daemon, returns immediately)."""
+    from daemon.runner import is_running, send_retry
     if not is_running():
         console.print("[red]Daemon is not running. Start it with: chartools daemon start[/red]")
         raise typer.Exit(1)
 
     ts_dir = directory.resolve()
-    from daemon.collect import CollectManager
-    from daemon.deploy import retry_testsuite
+    try:
+        reply = send_retry(ts_dir)
+    except ConnectionRefusedError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
 
-    console.print(f"Retrying FAILURE runs in [bold]{ts_dir.name}[/bold]...")
-    retry_testsuite(ts_dir, CollectManager())
+    if reply.get("ok"):
+        console.print(
+            f"[green]Retry queued for '{ts_dir.name}' — watch: chartools status {ts_dir}[/green]"
+        )
+    else:
+        console.print(f"[red]Error: {reply.get('error')}[/red]")
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
