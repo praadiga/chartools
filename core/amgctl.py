@@ -27,6 +27,7 @@ _NOISY_LOG_FRAGMENTS = (
     "fetching logs",
     "log not available",
     "retrying",
+    "reconciling status",
 )
 
 def _is_noisy_log_line(line: str) -> bool:
