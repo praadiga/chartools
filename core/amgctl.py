@@ -19,6 +19,21 @@ AMGCTL_BIN    = Path(
 _S3_BASE      = "s3://iota-non-prod-artifacts/ieg-core_services"
 _ANSI_RE      = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# Lines from amgctl log stream that are noisy/repetitive — suppressed from Python
+# logger but still scanned for terminal conditions.
+_NOISY_LOG_FRAGMENTS = (
+    "waiting for log",
+    "waiting for logs",
+    "fetching logs",
+    "log not available",
+    "retrying",
+)
+
+def _is_noisy_log_line(line: str) -> bool:
+    low = line.lower()
+    return any(frag in low for frag in _NOISY_LOG_FRAGMENTS)
+
+
 # Strings to detect in amgctl logs output
 LOG_PR_CREATED          = "PR created in Github, PR number"
 LOG_ALREADY_EXISTS      = "already exist in cloud"
@@ -401,7 +416,7 @@ def poll_playout_logs(
                     break
                 full_log += line
                 clean_line = strip_ansi(line).rstrip()
-                if clean_line:
+                if clean_line and not _is_noisy_log_line(clean_line):
                     _log.info("[logs:%s] %s", player_name, clean_line)
                 if found_result is None:
                     found_result = _check(strip_ansi(full_log))
