@@ -67,9 +67,9 @@ def _systemctl(*args: str) -> int:
 @daemon_app.command("start")
 def daemon_start(
     foreground: bool = typer.Option(False, "--foreground", "-f",
-                                    help="Run in foreground (for screen/tmux). Default: use systemd if installed."),
+                                    help="Run in foreground (used by systemd ExecStart — not for manual use)."),
 ):
-    """Start the daemon (via systemd if installed, otherwise foreground)."""
+    """Start the daemon. Uses systemd if installed; run 'chartools daemon install' first."""
     from daemon.runner import Daemon, is_running
     if is_running():
         console.print("[yellow]Daemon is already running.[/yellow]")
@@ -78,16 +78,18 @@ def daemon_start(
     if not foreground and _service_installed():
         rc = _systemctl("start", _SERVICE_NAME)
         if rc == 0:
-            console.print("[green]Daemon started via systemd.[/green]")
-            console.print(f"  logs: chartools daemon logs")
+            console.print("[green]Daemon started.[/green]")
+            console.print("  logs:   chartools daemon logs -f")
+            console.print("  status: chartools daemon status")
         else:
-            console.print("[red]systemctl start failed — check: journalctl --user -u chartools[/red]")
+            console.print("[red]systemctl start failed — check: chartools daemon logs[/red]")
             raise typer.Exit(rc)
-    else:
-        if not foreground and not _service_installed():
-            console.print("[yellow]systemd service not installed — running in foreground.[/yellow]")
-            console.print("  Tip: run 'chartools daemon install' to set up auto-start.")
+    elif foreground:
         Daemon().start()
+    else:
+        console.print("[red]systemd service not installed.[/red]")
+        console.print("  Run: chartools daemon install")
+        raise typer.Exit(1)
 
 
 @daemon_app.command("stop")
