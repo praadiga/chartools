@@ -49,7 +49,7 @@ def _fmt_since(since_iso: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 _SERVICE_NAME = "chartools"
-_SERVICE_PATH = Path.home() / ".config" / "systemd" / "user" / f"{_SERVICE_NAME}.service"
+_SERVICE_PATH = Path(f"/etc/systemd/system/{_SERVICE_NAME}.service")
 
 
 def _systemd_available() -> bool:
@@ -60,20 +60,8 @@ def _service_installed() -> bool:
     return _SERVICE_PATH.exists()
 
 
-def _user_env() -> dict:
-    """Return env with XDG_RUNTIME_DIR set — needed on SSH servers that don't set it."""
-    import os as _os
-    env = dict(_os.environ)
-    if "XDG_RUNTIME_DIR" not in env:
-        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
-    return env
-
-
 def _systemctl(*args: str) -> int:
-    return subprocess.run(
-        ["systemctl", "--user"] + list(args),
-        env=_user_env(),
-    ).returncode
+    return subprocess.run(["sudo", "systemctl"] + list(args)).returncode
 
 
 @daemon_app.command("start")
@@ -140,10 +128,10 @@ def daemon_logs(
 ):
     """Show daemon logs (journalctl if systemd, otherwise daemon.log)."""
     if _service_installed():
-        args = ["journalctl", "--user", "-u", _SERVICE_NAME, f"-n{lines}"]
+        args = ["journalctl", "-u", _SERVICE_NAME, f"-n{lines}"]
         if follow:
             args.append("-f")
-        subprocess.run(args, env=_user_env())
+        subprocess.run(args)
     else:
         log_path = Path.home() / ".chartools" / "daemon.log"
         if not log_path.exists():
@@ -157,15 +145,16 @@ def daemon_logs(
 
 @daemon_app.command("install")
 def daemon_install():
-    """Install chartools as a systemd user service (auto-start on login)."""
+    """Install chartools as a systemd system service (auto-start on boot, runs as current user)."""
     if not _systemd_available():
         console.print("[red]systemctl not found — systemd is not available on this system.[/red]")
         raise typer.Exit(1)
 
-    python_bin  = sys.executable
-    repo_dir    = Path(__file__).parent.resolve()
-    kubesetup   = os.environ.get("CHARTOOLS_KUBESETUP",
-                                  str(Path.home() / "kubeport_use1.sh"))
+    python_bin = sys.executable
+    repo_dir   = Path(__file__).parent.resolve()
+    username   = os.environ.get("USER", os.environ.get("LOGNAME", ""))
+    home_dir   = str(Path.home())
+    kubesetup  = os.environ.get("CHARTOOLS_KUBESETUP", str(Path.home() / "kubeport_use1.sh"))
 
     service_content = f"""\
 [Unit]
@@ -174,36 +163,45 @@ After=network.target
 
 [Service]
 Type=simple
+User={username}
 WorkingDirectory={repo_dir}
 ExecStart={python_bin} -m chartools daemon start --foreground
 Restart=on-failure
 RestartSec=10
+Environment=HOME={home_dir}
 Environment=CHARTOOLS_KUBESETUP={kubesetup}
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 """
 
-    _SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _SERVICE_PATH.write_text(service_content)
+    import tempfile, shutil
+    with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
+        f.write(service_content)
+        tmp_path = f.name
+
+    # Write to /etc/systemd/system/ via sudo
+    cp_rc = subprocess.run(["sudo", "cp", tmp_path, str(_SERVICE_PATH)]).returncode
+    Path(tmp_path).unlink(missing_ok=True)
+    if cp_rc != 0:
+        console.print("[red]Failed to write service file (sudo cp failed).[/red]")
+        raise typer.Exit(cp_rc)
+
     console.print(f"[green]Service file written:[/green] {_SERVICE_PATH}")
 
-    reload_rc = _systemctl("daemon-reload")
+    _systemctl("daemon-reload")
     enable_rc = _systemctl("enable", _SERVICE_NAME)
 
-    if reload_rc == 0 and enable_rc == 0:
-        console.print("[green]Service enabled — will auto-start on login.[/green]")
-        console.print("\nNext steps:")
-        console.print("  chartools daemon start    ← start now")
-        console.print("  chartools daemon status   ← check status")
-        console.print("  chartools daemon logs -f  ← follow logs")
+    if enable_rc == 0:
+        console.print("[green]Service enabled — will auto-start on boot.[/green]")
     else:
-        console.print("\n[yellow]systemctl --user could not connect to D-Bus.[/yellow]")
-        console.print("This is common on SSH servers. Fix it with one command (needs sudo):\n")
-        console.print(f"  [bold]sudo loginctl enable-linger {os.environ.get('USER', 'your-username')}[/bold]\n")
-        console.print("Then re-run:")
-        console.print("  chartools daemon install")
-        console.print("  chartools daemon start")
+        console.print("[red]Failed to enable service.[/red]")
+        raise typer.Exit(enable_rc)
+
+    console.print("\nNext steps:")
+    console.print("  chartools daemon start    ← start now")
+    console.print("  chartools daemon status   ← check status")
+    console.print("  chartools daemon logs -f  ← follow logs")
 
 
 @daemon_app.command("uninstall")
@@ -215,7 +213,7 @@ def daemon_uninstall():
 
     _systemctl("stop",    _SERVICE_NAME)
     _systemctl("disable", _SERVICE_NAME)
-    _SERVICE_PATH.unlink()
+    subprocess.run(["sudo", "rm", "-f", str(_SERVICE_PATH)])
     _systemctl("daemon-reload")
     console.print(f"[green]Service removed.[/green] Daemon will no longer auto-start.")
 
