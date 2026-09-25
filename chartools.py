@@ -60,8 +60,20 @@ def _service_installed() -> bool:
     return _SERVICE_PATH.exists()
 
 
+def _user_env() -> dict:
+    """Return env with XDG_RUNTIME_DIR set — needed on SSH servers that don't set it."""
+    import os as _os
+    env = dict(_os.environ)
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    return env
+
+
 def _systemctl(*args: str) -> int:
-    return subprocess.run(["systemctl", "--user"] + list(args)).returncode
+    return subprocess.run(
+        ["systemctl", "--user"] + list(args),
+        env=_user_env(),
+    ).returncode
 
 
 @daemon_app.command("start")
@@ -131,7 +143,7 @@ def daemon_logs(
         args = ["journalctl", "--user", "-u", _SERVICE_NAME, f"-n{lines}"]
         if follow:
             args.append("-f")
-        subprocess.run(args)
+        subprocess.run(args, env=_user_env())
     else:
         log_path = Path.home() / ".chartools" / "daemon.log"
         if not log_path.exists():
@@ -176,17 +188,22 @@ WantedBy=default.target
     _SERVICE_PATH.write_text(service_content)
     console.print(f"[green]Service file written:[/green] {_SERVICE_PATH}")
 
-    _systemctl("daemon-reload")
-    rc = _systemctl("enable", _SERVICE_NAME)
-    if rc == 0:
-        console.print(f"[green]Service enabled — will auto-start on login.[/green]")
-    else:
-        console.print("[yellow]Warning: could not enable service (non-fatal).[/yellow]")
+    reload_rc = _systemctl("daemon-reload")
+    enable_rc = _systemctl("enable", _SERVICE_NAME)
 
-    console.print("\nNext steps:")
-    console.print("  chartools daemon start    ← start now")
-    console.print("  chartools daemon status   ← check status")
-    console.print("  chartools daemon logs -f  ← follow logs")
+    if reload_rc == 0 and enable_rc == 0:
+        console.print("[green]Service enabled — will auto-start on login.[/green]")
+        console.print("\nNext steps:")
+        console.print("  chartools daemon start    ← start now")
+        console.print("  chartools daemon status   ← check status")
+        console.print("  chartools daemon logs -f  ← follow logs")
+    else:
+        console.print("\n[yellow]systemctl --user could not connect to D-Bus.[/yellow]")
+        console.print("This is common on SSH servers. Fix it with one command (needs sudo):\n")
+        console.print(f"  [bold]sudo loginctl enable-linger {os.environ.get('USER', 'your-username')}[/bold]\n")
+        console.print("Then re-run:")
+        console.print("  chartools daemon install")
+        console.print("  chartools daemon start")
 
 
 @daemon_app.command("uninstall")
