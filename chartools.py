@@ -48,32 +48,157 @@ def _fmt_since(since_iso: Optional[str]) -> str:
 # daemon subcommands
 # ---------------------------------------------------------------------------
 
+_SERVICE_NAME = "chartools"
+_SERVICE_PATH = Path.home() / ".config" / "systemd" / "user" / f"{_SERVICE_NAME}.service"
+
+
+def _systemd_available() -> bool:
+    return subprocess.run(["which", "systemctl"], capture_output=True).returncode == 0
+
+
+def _service_installed() -> bool:
+    return _SERVICE_PATH.exists()
+
+
+def _systemctl(*args: str) -> int:
+    return subprocess.run(["systemctl", "--user"] + list(args)).returncode
+
+
 @daemon_app.command("start")
-def daemon_start():
-    """Start the daemon in the foreground (run inside screen/tmux)."""
+def daemon_start(
+    foreground: bool = typer.Option(False, "--foreground", "-f",
+                                    help="Run in foreground (for screen/tmux). Default: use systemd if installed."),
+):
+    """Start the daemon (via systemd if installed, otherwise foreground)."""
     from daemon.runner import Daemon, is_running
     if is_running():
         console.print("[yellow]Daemon is already running.[/yellow]")
         raise typer.Exit(1)
-    Daemon().start()
+
+    if not foreground and _service_installed():
+        rc = _systemctl("start", _SERVICE_NAME)
+        if rc == 0:
+            console.print("[green]Daemon started via systemd.[/green]")
+            console.print(f"  logs: chartools daemon logs")
+        else:
+            console.print("[red]systemctl start failed — check: journalctl --user -u chartools[/red]")
+            raise typer.Exit(rc)
+    else:
+        if not foreground and not _service_installed():
+            console.print("[yellow]systemd service not installed — running in foreground.[/yellow]")
+            console.print("  Tip: run 'chartools daemon install' to set up auto-start.")
+        Daemon().start()
 
 
 @daemon_app.command("stop")
 def daemon_stop():
     """Gracefully stop the daemon."""
-    from daemon.runner import stop_daemon
-    stop_daemon()
+    if _service_installed():
+        rc = _systemctl("stop", _SERVICE_NAME)
+        if rc == 0:
+            console.print("[green]Daemon stopped.[/green]")
+        else:
+            console.print("[red]systemctl stop failed.[/red]")
+            raise typer.Exit(rc)
+    else:
+        from daemon.runner import stop_daemon
+        stop_daemon()
 
 
 @daemon_app.command("status")
 def daemon_status():
     """Check whether the daemon is running."""
-    from daemon.runner import is_running, PID_PATH
-    if is_running():
-        pid = PID_PATH.read_text().strip()
-        console.print(f"[green]Daemon is running[/green] (PID {pid})")
+    if _service_installed():
+        _systemctl("status", _SERVICE_NAME)
     else:
-        console.print("[red]Daemon is not running.[/red]")
+        from daemon.runner import is_running, PID_PATH
+        if is_running():
+            pid = PID_PATH.read_text().strip()
+            console.print(f"[green]Daemon is running[/green] (PID {pid})")
+        else:
+            console.print("[red]Daemon is not running.[/red]")
+
+
+@daemon_app.command("logs")
+def daemon_logs(
+    lines: int = typer.Option(50, "--lines", "-n", help="Number of recent lines to show."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output (like tail -f)."),
+):
+    """Show daemon logs (journalctl if systemd, otherwise daemon.log)."""
+    if _service_installed():
+        args = ["journalctl", "--user", "-u", _SERVICE_NAME, f"-n{lines}"]
+        if follow:
+            args.append("-f")
+        subprocess.run(args)
+    else:
+        log_path = Path.home() / ".chartools" / "daemon.log"
+        if not log_path.exists():
+            console.print("[red]No daemon.log found.[/red]")
+            raise typer.Exit(1)
+        if follow:
+            subprocess.run(["tail", f"-n{lines}", "-f", str(log_path)])
+        else:
+            subprocess.run(["tail", f"-n{lines}", str(log_path)])
+
+
+@daemon_app.command("install")
+def daemon_install():
+    """Install chartools as a systemd user service (auto-start on login)."""
+    if not _systemd_available():
+        console.print("[red]systemctl not found — systemd is not available on this system.[/red]")
+        raise typer.Exit(1)
+
+    python_bin  = sys.executable
+    repo_dir    = Path(__file__).parent.resolve()
+    kubesetup   = os.environ.get("CHARTOOLS_KUBESETUP",
+                                  str(Path.home() / "kubeport_use1.sh"))
+
+    service_content = f"""\
+[Unit]
+Description=Characterization Tool Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={repo_dir}
+ExecStart={python_bin} -m chartools daemon start --foreground
+Restart=on-failure
+RestartSec=10
+Environment=CHARTOOLS_KUBESETUP={kubesetup}
+
+[Install]
+WantedBy=default.target
+"""
+
+    _SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _SERVICE_PATH.write_text(service_content)
+    console.print(f"[green]Service file written:[/green] {_SERVICE_PATH}")
+
+    _systemctl("daemon-reload")
+    rc = _systemctl("enable", _SERVICE_NAME)
+    if rc == 0:
+        console.print(f"[green]Service enabled — will auto-start on login.[/green]")
+    else:
+        console.print("[yellow]Warning: could not enable service (non-fatal).[/yellow]")
+
+    console.print("\nNext steps:")
+    console.print("  chartools daemon start    ← start now")
+    console.print("  chartools daemon status   ← check status")
+    console.print("  chartools daemon logs -f  ← follow logs")
+
+
+@daemon_app.command("uninstall")
+def daemon_uninstall():
+    """Remove the systemd user service."""
+    if not _service_installed():
+        console.print("[yellow]Service is not installed.[/yellow]")
+        raise typer.Exit(1)
+
+    _systemctl("stop",    _SERVICE_NAME)
+    _systemctl("disable", _SERVICE_NAME)
+    _SERVICE_PATH.unlink()
+    _systemctl("daemon-reload")
+    console.print(f"[green]Service removed.[/green] Daemon will no longer auto-start.")
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +383,7 @@ def retry(
     """Retry all FAILURE runs in a testsuite (dispatches to daemon, returns immediately)."""
     from daemon.runner import is_running, send_retry
     if not is_running():
-        console.print("[red]Daemon is not running. Start it with: chartools daemon start[/red]")
+        console.print("[red]Daemon is not running. Run: chartools daemon start[/red]")
         raise typer.Exit(1)
 
     ts_dir = directory.resolve()
